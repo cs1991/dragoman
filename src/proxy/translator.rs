@@ -107,3 +107,38 @@ impl PromptTranslator {
         (Some(content.to_string()), None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_plain_text() {
+        let input = "Hello, world! This is a simple test.";
+        let (text, tool_calls) = PromptTranslator::parse_response(input);
+        assert_eq!(text, Some(input.to_string()));
+        assert!(tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_parse_tool_call() {
+        let input = "I will check the file.\n<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/test.txt\"}}</tool_call>";
+        let (text, tool_calls) = PromptTranslator::parse_response(input);
+        assert_eq!(text, Some("I will check the file.".to_string()));
+        assert!(tool_calls.is_some());
+        let calls = tool_calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "read_file");
+        assert!(calls[0].function.arguments.contains("/tmp/test.txt"));
+    }
+
+    #[test]
+    fn test_parse_standalone_tool_call() {
+        let input = "<tool_call>{\"name\": \"get_weather\", \"arguments\": {\"location\": \"Hanoi\"}}</tool_call>";
+        let (text, tool_calls) = PromptTranslator::parse_response(input);
+        assert!(text.is_none());
+        assert!(tool_calls.is_some());
+        let calls = tool_calls.unwrap();
+        assert_eq!(calls[0].function.name, "get_weather");
+    }
+}
