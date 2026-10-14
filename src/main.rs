@@ -1,22 +1,25 @@
 mod browser;
 mod openai;
 mod proxy;
+mod session;
+mod web;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use clap::{Parser, Subcommand};
-use tokio::sync::Mutex;
 use tracing::{info, level_filters::LevelFilter};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::browser::{BrowserLauncher, CdpClient};
 use crate::proxy::server::{create_router, AppState};
+use crate::session::SessionData;
+use crate::web::GeminiWebClient;
 
 #[derive(Parser, Debug)]
 #[command(name = "dragoman")]
 #[command(author = "Khoi Pham Minh <khoipm06@gmail.com>")]
 #[command(version = "0.1.0")]
-#[command(about = "High-performance OpenAI-compatible proxy for Gemini Web (Gemini 4 Argon)", long_about = None)]
+#[command(about = "High-performance native OpenAI-compatible proxy for Gemini Web (Gemini 4 Argon)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -24,35 +27,26 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Start the OpenAI-compatible proxy server
+    /// Start the standalone OpenAI-compatible proxy server (no browser needed)
     Serve {
         /// HTTP listen port for external coding agents
         #[arg(short, long, default_value_t = 8080)]
         port: u16,
 
-        /// Chrome DevTools Protocol (CDP) port
-        #[arg(long, default_value_t = 9222)]
-        cdp_port: u16,
-
         /// Target model identifier reported to coding agents
         #[arg(short, long, default_value = "gemini-4-argon")]
         model: String,
-
-        /// Automatically launch Chrome if not already running
-        #[arg(long, default_value_t = true)]
-        auto_launch: bool,
     },
-    /// Launch the dedicated Chrome session for login
-    Launch {
-        /// Chrome DevTools Protocol (CDP) port
+    /// Perform one-time browser login to extract and save session credentials
+    Login {
+        /// Chrome DevTools Protocol (CDP) port used during login
         #[arg(long, default_value_t = 9222)]
         cdp_port: u16,
     },
-    /// Check browser connection and Gemini Web status
-    Status {
-        /// Chrome DevTools Protocol (CDP) port
-        #[arg(long, default_value_t = 9222)]
-        cdp_port: u16,
+    /// Test direct native HTTP RPC without browser
+    TestRpc {
+        #[arg(default_value = "Say hello and confirm you are Gemini 4 Argon in 1 sentence.")]
+        prompt: String,
     },
 }
 
@@ -68,31 +62,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command.unwrap_or(Commands::Serve {
         port: 8080,
-        cdp_port: 9222,
         model: "gemini-4-argon".to_string(),
-        auto_launch: true,
     }) {
-        Commands::Serve {
-            port,
-            cdp_port,
-            model,
-            auto_launch,
-        } => {
+        Commands::Serve { port, model } => {
             println!("=======================================================");
-            println!(" Dragoman - Gemini Web OpenAI-Compatible Bridge");
-            println!(" Model Target: {}", model);
+            println!(" Dragoman - Native Gemini Web OpenAI Bridge");
+            println!(" Target Model: {}", model);
+            println!(" Mode: Standalone HTTP/2 Direct RPC (Zero Browser Runtime)");
             println!(" Proxy Endpoint: http://127.0.0.1:{}/v1/chat/completions", port);
             println!("=======================================================\n");
 
-            if auto_launch {
-                if let Err(e) = BrowserLauncher::ensure_chrome_running(cdp_port, None).await {
-                    eprintln!("Warning: Auto-launch failed: {}. Continuing in case browser is started manually.", e);
+            let session = match SessionData::load() {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    eprintln!("Please run 'dragoman login' first to authenticate with your Google AI Pro account.");
+                    std::process::exit(1);
                 }
-            }
+            };
 
+            let web_client = Arc::new(GeminiWebClient::new(session));
             let app_state = Arc::new(AppState {
-                cdp_client: Arc::new(Mutex::new(None)),
-                cdp_port,
+                web_client,
                 default_model: model,
             });
 
@@ -103,30 +94,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             axum::serve(listener, router).await?;
         }
-        Commands::Launch { cdp_port } => {
-            info!("Launching browser for Google Account authentication...");
+        Commands::Login { cdp_port } => {
+            println!("=== Dragoman Initial Login & Credential Extraction ===");
+            println!("Ensuring Chrome is running with remote debugging on port {}...", cdp_port);
+
             BrowserLauncher::ensure_chrome_running(cdp_port, None).await
                 .map_err(|e| format!("Failed to launch browser: {}", e))?;
-            println!("\nBrowser launched. Navigate to https://gemini.google.com and log in with your Google AI Pro account.");
-            println!("Once logged in, run: dragoman serve");
+
+            println!("Connecting to Chrome DevTools to extract session tokens...");
+            let client = CdpClient::connect_to_gemini(cdp_port).await?;
+
+            println!("Extracting session tokens (SNlM0e, FdrFJe, cfb2h) and cookies...");
+            let snlm0e = client.evaluate_js("window.WIZ_global_data?.SNlM0e || ''").await?
+                .as_str().unwrap_or("").to_string();
+            let f_sid = client.evaluate_js("window.WIZ_global_data?.FdrFJe || ''").await?
+                .as_str().unwrap_or("").to_string();
+            let bl = client.evaluate_js("window.WIZ_global_data?.cfb2h || ''").await?
+                .as_str().unwrap_or("").to_string();
+
+            if snlm0e.is_empty() {
+                eprintln!("\nWarning: Could not read SNlM0e. Please ensure you are logged in to https://gemini.google.com in the browser window.");
+                return Ok(());
+            }
+
+            // Extract cookies via CDP
+            let cookies_val = client.call_cdp("Network.getCookies", serde_json::json!({
+                "urls": ["https://gemini.google.com"]
+            })).await?;
+
+            let mut cookie_header = String::new();
+            if let Some(cookies) = cookies_val.get("result").and_then(|r| r.get("cookies")).and_then(|c| c.as_array()) {
+                let parts: Vec<String> = cookies.iter()
+                    .filter_map(|c| {
+                        let name = c.get("name")?.as_str()?;
+                        let value = c.get("value")?.as_str()?;
+                        Some(format!("{}={}", name, value))
+                    })
+                    .collect();
+                cookie_header = parts.join("; ");
+            }
+
+            let session = SessionData {
+                snlm0e,
+                f_sid,
+                bl,
+                cookie: cookie_header,
+                model: "Argon4p0".to_string(),
+                conversation_id: None,
+                response_id: None,
+                choice_id: None,
+            };
+
+            session.save()?;
+            println!("\nSUCCESS: Saved authentication session to ~/.config/dragoman/session.json!");
+            println!("You can now close Chrome completely.");
+            println!("Run 'dragoman serve' to launch the proxy without any browser running.");
         }
-        Commands::Status { cdp_port } => {
-            let ready = BrowserLauncher::is_cdp_ready(cdp_port).await;
-            if ready {
-                println!("Chrome CDP is RUNNING on port {}", cdp_port);
-                match CdpClient::connect_to_gemini(cdp_port).await {
-                    Ok(client) => {
-                        let current_model = client.check_model_selected("gemini-4-argon").await?;
-                        println!("Gemini Web tab CONNECTED.");
-                        println!("Active Model in Web UI: {}", current_model);
-                    }
-                    Err(e) => {
-                        println!("Connected to Chrome, but no active Gemini tab: {}", e);
-                    }
+        Commands::TestRpc { prompt } => {
+            let session = SessionData::load()
+                .map_err(|e| format!("Could not load session: {}", e))?;
+            println!("Loaded session: bl={}, model={}", session.bl, session.model);
+            let client = GeminiWebClient::new(session);
+            let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+
+            println!("Sending prompt: \"{}\"", prompt);
+            tokio::spawn(async move {
+                while let Some(delta) = rx.recv().await {
+                    print!("{}", delta);
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
                 }
-            } else {
-                println!("Chrome CDP is NOT running on port {}.", cdp_port);
-                println!("Run 'dragoman launch' or start Chrome with --remote-debugging-port={}", cdp_port);
+            });
+
+            match client.send_prompt_stream(&prompt, tx).await {
+                Ok(full) => {
+                    println!("\n\n--- Direct RPC Completed successfully ---");
+                    println!("Total chars received: {}", full.len());
+                }
+                Err(e) => {
+                    eprintln!("\nDirect RPC error: {}", e);
+                }
             }
         }
     }

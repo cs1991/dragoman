@@ -12,7 +12,7 @@ impl BrowserLauncher {
             return Ok(format!("http://127.0.0.1:{}", port));
         }
 
-        info!("Chrome is not running on port {}. Launching browser...", port);
+        info!("Launching browser for authentication on port {}...", port);
 
         let data_dir = profile_dir.unwrap_or_else(|| {
             dirs_profile_dir()
@@ -24,7 +24,6 @@ impl BrowserLauncher {
         let port_flag = format!("--remote-debugging-port={}", port);
         let user_data_flag = format!("--user-data-dir={}", data_dir.display());
 
-        // Check if Flatpak Google Chrome is available
         let flatpak_status = Command::new("flatpak")
             .args(["info", "com.google.Chrome"])
             .stdout(Stdio::null())
@@ -57,7 +56,6 @@ impl BrowserLauncher {
             return Err(format!("Failed to launch Chrome: {}", e));
         }
 
-        // Wait up to 15 seconds for CDP to become ready
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_millis(500)).await;
             if Self::is_cdp_ready(port).await {

@@ -11,18 +11,17 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::browser::CdpClient;
 use crate::openai::types::*;
 use crate::proxy::translator::PromptTranslator;
+use crate::web::GeminiWebClient;
 
 pub struct AppState {
-    pub cdp_client: Arc<Mutex<Option<Arc<CdpClient>>>>,
-    pub cdp_port: u16,
+    pub web_client: Arc<GeminiWebClient>,
     pub default_model: String,
 }
 
@@ -42,20 +41,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 }
 
 async fn root_handler() -> &'static str {
-    "Dragoman OpenAI-compatible bridge for Gemini Web (Gemini 4 Argon) is running."
+    "Dragoman Native OpenAI-compatible bridge for Gemini Web (Gemini 4 Argon) is running."
 }
 
 async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let cdp_ready = {
-        let guard = state.cdp_client.lock().await;
-        guard.is_some()
-    };
-
     Json(serde_json::json!({
         "status": "ok",
         "service": "dragoman",
-        "cdp_port": state.cdp_port,
-        "cdp_connected": cdp_ready,
+        "engine": "native-http2-streamgenerate",
         "model": state.default_model
     }))
 }
@@ -96,27 +89,6 @@ async fn chat_completions(
 ) -> Result<Response, (StatusCode, String)> {
     info!("Received chat completion request for model: {}", req.model);
 
-    // Ensure CDP client is active and grab an Arc clone
-    let cdp: Arc<CdpClient> = {
-        let mut guard = state.cdp_client.lock().await;
-        if guard.is_none() {
-            info!("Connecting to Chrome CDP on port {}...", state.cdp_port);
-            match CdpClient::connect_to_gemini(state.cdp_port).await {
-                Ok(client) => {
-                    *guard = Some(Arc::new(client));
-                }
-                Err(e) => {
-                    error!("Failed to connect to Chrome CDP: {}", e);
-                    return Err((
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        format!("Browser connection failed: {}. Is Chrome running on port {}?", e, state.cdp_port),
-                    ));
-                }
-            }
-        }
-        guard.as_ref().unwrap().clone()
-    };
-
     let prompt = PromptTranslator::build_gemini_prompt(&req);
     let is_stream = req.stream.unwrap_or(false);
     let request_model = req.model.clone();
@@ -127,11 +99,11 @@ async fn chat_completions(
         let stream_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
         let created_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
-        // Spawn prompt submission and streaming task
-        let cdp_clone = cdp.clone();
+        // Spawn prompt submission and streaming task via direct native HTTP RPC
+        let client = state.web_client.clone();
         let prompt_clone = prompt.clone();
         tokio::spawn(async move {
-            if let Err(e) = cdp_clone.submit_prompt_and_stream(&prompt_clone, delta_tx).await {
+            if let Err(e) = client.send_prompt_stream(&prompt_clone, delta_tx).await {
                 error!("Prompt stream execution error: {}", e);
             }
         });
@@ -224,7 +196,7 @@ async fn chat_completions(
 
         Ok(Sse::new(sse_stream).keep_alive(KeepAlive::default()).into_response())
     } else {
-        match cdp.submit_prompt_and_stream(&prompt, delta_tx).await {
+        match state.web_client.send_prompt_stream(&prompt, delta_tx).await {
             Ok(full_output) => {
                 let (text_opt, tool_calls_opt) = PromptTranslator::parse_response(&full_output);
                 let finish_reason = if tool_calls_opt.is_some() {

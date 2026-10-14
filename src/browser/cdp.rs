@@ -147,6 +147,7 @@ impl CdpClient {
         Ok(serde_json::Value::Null)
     }
 
+    #[allow(dead_code)]
     pub async fn ensure_model_selected(&self, _target_model: &str) -> Result<String, String> {
         let js = r#"
             (async function() {
@@ -180,10 +181,12 @@ impl CdpClient {
         Ok(active)
     }
 
+    #[allow(dead_code)]
     pub async fn check_model_selected(&self, target_model: &str) -> Result<String, String> {
         self.ensure_model_selected(target_model).await
     }
 
+    #[allow(dead_code)]
     pub async fn submit_prompt_and_stream(
         &self,
         prompt: &str,
