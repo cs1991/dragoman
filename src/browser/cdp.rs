@@ -147,15 +147,41 @@ impl CdpClient {
         Ok(serde_json::Value::Null)
     }
 
-    pub async fn check_model_selected(&self, _target_model: &str) -> Result<String, String> {
+    pub async fn ensure_model_selected(&self, _target_model: &str) -> Result<String, String> {
         let js = r#"
-            (function() {
-                const picker = document.querySelector('[aria-label*="Model"], [data-test-id*="model-picker"]');
-                return picker ? picker.innerText.trim() : "Unknown";
+            (async function() {
+                const pickerBtn = document.querySelector('button[aria-label*="mode picker"], button[aria-label*="model picker"]') ||
+                                  Array.from(document.querySelectorAll('button')).find(b => /flash|pro|argon/i.test(b.innerText || ''));
+                if (!pickerBtn) return "Unknown";
+
+                const currentText = pickerBtn.innerText.trim();
+                if (/argon/i.test(currentText)) {
+                    return currentText;
+                }
+
+                // If not Argon, open menu and select 4 Argon (Argon4p0)
+                pickerBtn.click();
+                await new Promise(r => setTimeout(r, 400));
+
+                const menuItems = Array.from(document.querySelectorAll('[role="menuitem"], .mat-mdc-menu-item'));
+                const argonItem = menuItems.find(m => /4 Argon|Argon/i.test(m.innerText || ''));
+                if (argonItem) {
+                    argonItem.click();
+                    await new Promise(r => setTimeout(r, 600));
+                    return "Argon (Argon4p0)";
+                }
+
+                return currentText;
             })();
         "#;
         let val = self.evaluate_js(js).await?;
-        Ok(val.as_str().unwrap_or("Unknown").to_string())
+        let active = val.as_str().unwrap_or("Unknown").to_string();
+        info!("Active Gemini Web model: {}", active);
+        Ok(active)
+    }
+
+    pub async fn check_model_selected(&self, target_model: &str) -> Result<String, String> {
+        self.ensure_model_selected(target_model).await
     }
 
     pub async fn submit_prompt_and_stream(
@@ -163,6 +189,9 @@ impl CdpClient {
         prompt: &str,
         delta_tx: mpsc::Sender<String>,
     ) -> Result<String, String> {
+        // Enforce Gemini 4 Argon selection before submitting prompt
+        let _ = self.ensure_model_selected("Argon").await;
+
         let escaped_prompt = serde_json::to_string(prompt).unwrap_or_else(|_| "\"\"".to_string());
 
         // 0. Get current response count to isolate new turn
