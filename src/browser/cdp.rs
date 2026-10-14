@@ -165,6 +165,15 @@ impl CdpClient {
     ) -> Result<String, String> {
         let escaped_prompt = serde_json::to_string(prompt).unwrap_or_else(|_| "\"\"".to_string());
 
+        // 0. Get current response count to isolate new turn
+        let count_js = r#"
+            (function() {
+                return document.querySelectorAll('.model-response-text, message-content, [data-test-id="model-turn"]').length;
+            })();
+        "#;
+        let count_val = self.evaluate_js(count_js).await.unwrap_or(serde_json::Value::from(0));
+        let count_before = count_val.as_u64().unwrap_or(0);
+
         // 1. Inject prompt and trigger send in Gemini Web
         let injection_js = format!(
             r#"
@@ -212,29 +221,32 @@ impl CdpClient {
         let mut idle_ticks = 0;
         let poll_interval = Duration::from_millis(250);
 
-        // Allow initial generation to start
-        tokio::time::sleep(Duration::from_millis(1200)).await;
-
-        let poll_script = r#"
-            (function() {
+        let poll_script = format!(
+            r#"
+            (function() {{
                 const responses = document.querySelectorAll('.model-response-text, message-content, [data-test-id="model-turn"]');
-                if (responses.length === 0) return { text: "", isDone: false };
+                if (responses.length <= {count_before}) {{
+                    return {{ text: "", isDone: false, waiting: true }};
+                }}
 
                 const latest = responses[responses.length - 1];
                 const text = latest.innerText || latest.textContent || "";
                 const stopBtn = document.querySelector('button[aria-label*="Stop"], button.stop-button');
                 const isGenerating = !!stopBtn;
 
-                return {
+                return {{
                     text: text,
-                    isDone: !isGenerating
-                };
-            })();
-        "#;
+                    isDone: !isGenerating,
+                    waiting: false
+                }};
+            }})();
+            "#,
+            count_before = count_before
+        );
 
         for _ in 0..1200 { // Max 5 minutes for deep reasoning (Argon)
             tokio::time::sleep(poll_interval).await;
-            let val = match self.evaluate_js(poll_script).await {
+            let val = match self.evaluate_js(&poll_script).await {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("Error polling response: {}", e);
