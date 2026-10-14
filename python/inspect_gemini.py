@@ -1,22 +1,30 @@
 import asyncio
 import json
+import urllib.request
 import websockets
 
+def get_gemini_tab_ws(cdp_port: int = 9222) -> str:
+    url = f"http://127.0.0.1:{cdp_port}/json"
+    with urllib.request.urlopen(url) as resp:
+        tabs = json.loads(resp.read().decode())
+    for t in tabs:
+        if "gemini.google.com" in t.get("url", ""):
+            ws_url = t.get("webSocketDebuggerUrl")
+            if ws_url:
+                return ws_url
+    raise RuntimeError("No active Gemini tab found with a WebSocket debugger URL.")
+
 async def inspect():
-    ws_url = "ws://127.0.0.1:9222/devtools/page/F1E9A0908DA749E63F607A76B95A9CDC"
+    ws_url = get_gemini_tab_ws()
     async with websockets.connect(ws_url) as ws:
-        # Enable Runtime
         await ws.send(json.dumps({"id": 1, "method": "Runtime.enable", "params": {}}))
         await ws.recv()
 
-        # JS inspection script
         js_code = """
         (function() {
-            // 1. Account Info
             const accountEl = document.querySelector('a[aria-label*="Google Account"], img[alt*="Google Account"], [data-ogb-account-name]');
             const accountText = accountEl ? (accountEl.getAttribute('aria-label') || accountEl.getAttribute('alt') || '') : '';
 
-            // 2. Model Picker & Dropdowns
             const allButtons = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"]'));
             const modelCandidates = allButtons.filter(b => {
                 const t = (b.innerText || '') + (b.getAttribute('aria-label') || '');
@@ -28,7 +36,6 @@ async def inspect():
                 tag: b.tagName
             }));
 
-            // 3. Document Title & URL
             return {
                 title: document.title,
                 url: window.location.href,
@@ -56,4 +63,5 @@ async def inspect():
                 print(json.dumps(data.get("result", {}).get("result", {}).get("value", {}), indent=2))
                 break
 
-asyncio.run(inspect())
+if __name__ == "__main__":
+    asyncio.run(inspect())

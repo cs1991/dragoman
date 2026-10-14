@@ -1,10 +1,28 @@
+"""
+Dragoman session exporter utility.
+Connects to Chrome via CDP, queries the active Gemini tab, extracts
+WIZ_global_data and cookies, and saves credentials to ~/.config/dragoman/session.json.
+"""
+
 import asyncio
 import json
 import os
+import urllib.request
 import websockets
 
+def get_gemini_tab_ws(cdp_port: int = 9222) -> str:
+    url = f"http://127.0.0.1:{cdp_port}/json"
+    with urllib.request.urlopen(url) as resp:
+        tabs = json.loads(resp.read().decode())
+    for t in tabs:
+        if "gemini.google.com" in t.get("url", ""):
+            ws_url = t.get("webSocketDebuggerUrl")
+            if ws_url:
+                return ws_url
+    raise RuntimeError("No active Gemini tab found with a WebSocket debugger URL.")
+
 async def export_session():
-    ws_url = "ws://127.0.0.1:9222/devtools/page/F1E9A0908DA749E63F607A76B95A9CDC"
+    ws_url = get_gemini_tab_ws()
     async with websockets.connect(ws_url) as ws:
         # 1. Get WIZ_global_data
         await ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate", "params": {
@@ -24,7 +42,7 @@ async def export_session():
 
         session = {
             "snlm0e": wiz.get("SNlM0e"),
-            "f_sid": wiz.get("f_sid"),
+            "f_sid": str(wiz.get("f_sid")),
             "bl": wiz.get("bl"),
             "cookie": cookie_header,
             "cookies": {c["name"]: c["value"] for c in cookies_list},
@@ -38,8 +56,8 @@ async def export_session():
             json.dump(session, f, indent=2)
 
         print("Session successfully exported to", path)
-        print("SNlM0e:", session["snlm0e"][:10] + "...")
         print("BL:", session["bl"])
         print("Cookies count:", len(cookies_list))
 
-asyncio.run(export_session())
+if __name__ == "__main__":
+    asyncio.run(export_session())

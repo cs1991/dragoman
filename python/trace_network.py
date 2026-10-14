@@ -1,18 +1,27 @@
 import asyncio
 import json
-import urllib.parse
+import urllib.request
 import websockets
 
+def get_gemini_tab_ws(cdp_port: int = 9222) -> str:
+    url = f"http://127.0.0.1:{cdp_port}/json"
+    with urllib.request.urlopen(url) as resp:
+        tabs = json.loads(resp.read().decode())
+    for t in tabs:
+        if "gemini.google.com" in t.get("url", ""):
+            ws_url = t.get("webSocketDebuggerUrl")
+            if ws_url:
+                return ws_url
+    raise RuntimeError("No active Gemini tab found with a WebSocket debugger URL.")
+
 async def trace():
-    ws_url = "ws://127.0.0.1:9222/devtools/page/F1E9A0908DA749E63F607A76B95A9CDC"
+    ws_url = get_gemini_tab_ws()
     async with websockets.connect(ws_url, max_size=20*1024*1024) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Network.enable", "params": {}}))
         await ws.send(json.dumps({"id": 2, "method": "Runtime.enable", "params": {}}))
 
-        # 1. Click "4 Argon" in the mode picker
         select_argon_js = """
         (async function() {
-            // Find and click the picker button if menu is not already open
             let menuItems = Array.from(document.querySelectorAll('[role="menuitem"], .mat-mdc-menu-item'));
             if (menuItems.length === 0) {
                 const pickerBtn = document.querySelector('button[aria-label*="mode picker"], button[aria-label*="model picker"]') ||
@@ -25,101 +34,32 @@ async def trace():
             const argonItem = menuItems.find(m => (m.innerText || '').includes('4 Argon'));
             if (argonItem) {
                 argonItem.click();
-                return { success: true, selected: "4 Argon" };
+                return "CLICKED_ARGON";
             }
-            return { success: false, items: menuItems.map(m => m.innerText) };
+            return "NOT_FOUND";
         })();
         """
 
         await ws.send(json.dumps({
-            "id": 10,
+            "id": 3,
             "method": "Runtime.evaluate",
             "params": {"expression": select_argon_js, "returnByValue": True, "awaitPromise": True}
         }))
 
-        # Wait for selection to apply
-        await asyncio.sleep(1.5)
+        print("Listening for Network events...")
+        while True:
+            msg = await ws.recv()
+            data = json.loads(msg)
+            method = data.get("method")
 
-        # 2. Submit a test prompt under Argon
-        prompt_js = """
-        (async function() {
-            const inputEl = document.querySelector('rich-textarea div[contenteditable="true"]') ||
-                            document.querySelector('div[role="textbox"]') ||
-                            document.querySelector('textarea');
-            if (!inputEl) throw new Error("No input box");
+            if method == "Network.requestWillBeSent":
+                req = data["params"]["request"]
+                url = req.get("url", "")
+                if "BardChatUi" in url or "StreamGenerate" in url:
+                    print(f"\n[REQUEST] {req.get('method')} {url}")
+                    post_data = req.get("postData")
+                    if post_data:
+                        print(f"POST DATA (first 300 chars): {post_data[:300]}")
 
-            inputEl.focus();
-            inputEl.innerText = "Network Trace Test for Gemini 4 Argon";
-            inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-            inputEl.dispatchEvent(new Event('change', { bubbles: true }));
-            await new Promise(r => setTimeout(r, 400));
-
-            const sendBtn = document.querySelector('button[aria-label*="Send"], button[jsname*="send"], button.send-button');
-            if (sendBtn && !sendBtn.disabled) {
-                sendBtn.click();
-                return "SENT";
-            }
-            inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-            return "SENT_ENTER";
-        })();
-        """
-
-        await ws.send(json.dumps({
-            "id": 20,
-            "method": "Runtime.evaluate",
-            "params": {"expression": prompt_js, "returnByValue": True, "awaitPromise": True}
-        }))
-
-        print("Listening for Network requests...")
-        captured_requests = []
-
-        for _ in range(50):
-            try:
-                msg = await asyncio.wait_for(ws.recv(), timeout=3.0)
-                data = json.loads(msg)
-                method = data.get("method", "")
-
-                if method == "Network.requestWillBeSent":
-                    params = data.get("params", {})
-                    req = params.get("request", {})
-                    url = req.get("url", "")
-
-                    if "assistant.lamda" in url or "BardChatUi" in url or "batchexecute" in url or "StreamGenerate" in url:
-                        post_data = req.get("postData", "")
-                        print("\n=======================================================")
-                        print(f"[CAPTURED RPC REQUEST]")
-                        print(f"URL: {url}")
-                        print(f"Method: {req.get('method')}")
-                        print("Headers:")
-                        for k, v in req.get("headers", {}).items():
-                            if k.lower() in ["content-type", "x-goog-batchexecute-bgr", "authorization", "x-same-domain"]:
-                                print(f"  {k}: {v}")
-                        print(f"Post Data (length {len(post_data)}):")
-                        
-                        # Parse URL-encoded f.req
-                        if "f.req=" in post_data:
-                            parsed = urllib.parse.parse_qs(post_data)
-                            f_req = parsed.get("f.req", [""])[0]
-                            print("\nDecoded f.req:")
-                            try:
-                                json_req = json.loads(f_req)
-                                print(json.dumps(json_req, indent=2)[:2000])
-                            except Exception:
-                                print(f_req[:2000])
-                        else:
-                            print(post_data[:1500])
-                        print("=======================================================\n")
-                        captured_requests.append(url)
-
-                elif method == "Network.responseReceived":
-                    params = data.get("params", {})
-                    resp = params.get("response", {})
-                    url = resp.get("url", "")
-                    if "StreamGenerate" in url or "assistant.lamda" in url:
-                        print(f"[RESPONSE RECEIVED] Status: {resp.get('status')} {resp.get('statusText')} | URL: {url}")
-
-            except asyncio.TimeoutError:
-                if captured_requests:
-                    break
-
-asyncio.run(trace())
+if __name__ == "__main__":
+    asyncio.run(trace())

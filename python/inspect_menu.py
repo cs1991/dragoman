@@ -1,14 +1,25 @@
 import asyncio
 import json
+import urllib.request
 import websockets
 
+def get_gemini_tab_ws(cdp_port: int = 9222) -> str:
+    url = f"http://127.0.0.1:{cdp_port}/json"
+    with urllib.request.urlopen(url) as resp:
+        tabs = json.loads(resp.read().decode())
+    for t in tabs:
+        if "gemini.google.com" in t.get("url", ""):
+            ws_url = t.get("webSocketDebuggerUrl")
+            if ws_url:
+                return ws_url
+    raise RuntimeError("No active Gemini tab found with a WebSocket debugger URL.")
+
 async def inspect_menu():
-    ws_url = "ws://127.0.0.1:9222/devtools/page/F1E9A0908DA749E63F607A76B95A9CDC"
+    ws_url = get_gemini_tab_ws()
     async with websockets.connect(ws_url) as ws:
         await ws.send(json.dumps({"id": 1, "method": "Runtime.enable", "params": {}}))
         await ws.recv()
 
-        # Click the model picker button
         click_js = """
         (async function() {
             const pickerBtn = document.querySelector('button[aria-label*="mode picker"], button[aria-label*="model picker"]') ||
@@ -18,16 +29,15 @@ async def inspect_menu():
             pickerBtn.click();
             await new Promise(r => setTimeout(r, 600));
 
-            // Query menu items
             const menuItems = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], mat-option, .mat-mdc-menu-item, [role="menu"] button'));
             return {
                 clicked: true,
                 pickerText: pickerBtn.innerText,
-                menuItems: menuItems.map(m => ({
-                    text: m.innerText.trim(),
+                items: menuItems.map(m => ({
+                    text: (m.innerText || '').trim(),
                     ariaLabel: m.getAttribute('aria-label'),
                     role: m.getAttribute('role'),
-                    classes: m.className
+                    className: m.className
                 }))
             };
         })();
@@ -51,4 +61,5 @@ async def inspect_menu():
                 print(json.dumps(data.get("result", {}).get("result", {}).get("value", {}), indent=2))
                 break
 
-asyncio.run(inspect_menu())
+if __name__ == "__main__":
+    asyncio.run(inspect_menu())
