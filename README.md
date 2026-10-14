@@ -1,110 +1,183 @@
 # Dragoman
 
-> **Dragoman** (*from Ottoman Turkish / Arabic dragoman: an official interpreter and diplomatic guide*): A high-performance, local OpenAI-compatible proxy written in Rust that bridges external coding agents (Cline, Aider, OpenHands, Codex) directly to **Gemini Web (`gemini.google.com`)** to access the **Gemini 4 Argon** reasoning model using your **Google AI Pro** account.
+> **Dragoman** (*from Ottoman Turkish / Arabic dragoman: an official interpreter and diplomatic guide*): A high-performance, local OpenAI-compatible bridge written in Rust that connects coding agents (Cline, Aider, OpenHands, Codex) directly to **Gemini Web (`gemini.google.com`)**, providing seamless access to the **Gemini 4 Argon** frontier reasoning model using your personal **Google AI Pro** subscription.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org/)
 
 ---
 
-## Architecture Overview
+## Key Highlights
 
-Dragoman follows the **Embedded Browser & CDP Bridge** pattern (pioneered by tools like `codex-chatgpt-web`):
+- **Direct Gemini 4 Argon Access**: Unlocks Google's frontier reasoning model (`Argon4p0`) via web subscription.
+- **Zero Browser Runtime**: Operates completely headless using native HTTP/2 direct RPC (`StreamGenerate`). Chrome is **never** kept running in the background.
+- **Full OpenAI API Compatibility**: Exposes standard `/v1/chat/completions`, `/v1/models`, and `/health` endpoints.
+- **Real-Time Streaming**: Native Server-Sent Events (SSE) deliver chunked token responses in real time with low latency.
+- **Agentic Tool Calling Emulation**: Injects function schemas into instructions and parses `<tool_call>` outputs into standard OpenAI `tool_calls` structures.
+- **Zero Cloud Billing / API Keys**: Routes traffic through your web subscription without incurring per-token API charges.
+
+---
+
+## Architecture
 
 ```text
-External Coding Agent (Cline / Aider / OpenHands)
+External Coding Agent (Cline / Aider / OpenHands / Codex)
   │
-  │ HTTP POST /v1/chat/completions (OpenAI JSON + Tools)
+  │ HTTP POST /v1/chat/completions (OpenAI JSON + Function Schemas)
   ▼
 Dragoman Proxy Server (Rust / Axum on http://127.0.0.1:8080)
   │
-  ├── 1. PromptTranslator: Maps stateless turns & Tool JSON Schemas into Gemini prompts
-  ├── 2. CdpClient: WebSocket communication via Chrome DevTools Protocol (CDP)
+  ├── 1. PromptTranslator: Maps stateless turns & Tool Schemas into prompt
+  ├── 2. GeminiWebClient: Direct HTTP/2 with OpenSSL (native-tls)
+  │      └── Uses session tokens from ~/.config/dragoman/session.json
+  ▼
+Google Gemini Backend (assistant.lamda.BardFrontendService/StreamGenerate)
+  │
+  ├── Dispatches payload for: Argon4p0 (Gemini 4 Argon)
   │
   ▼
-Dedicated Chrome Session (Port 9222, Persistent Profile)
-  │
-  ▼
-Gemini Web UI (gemini.google.com with Google AI Pro session)
-  │
-  ├── Selects and runs: Gemini 4 Argon
-  │
-  ▼
-Token Streaming & Tool Extraction
+Real-Time Stream Parser
   │
   └── Emits standard OpenAI SSE chunks (`data: {"choices": [{"delta": ...}]}`) back to agent
 ```
 
----
-
-## Features
-
-- **Direct Gemini 4 Argon Access**: Routes prompts through your active Google AI Pro web subscription.
-- **Zero API Billing / Key Required**: Does not consume Gemini API credits or require Google Cloud billing.
-- **Full OpenAI Compatibility**: Exposes standard `/v1/chat/completions` and `/v1/models` endpoints.
-- **Streaming & SSE Support**: Delivers tokens in real time via Server-Sent Events.
-- **Agentic Tool Calling Emulation**: Injects function schemas into system instructions and parses `<tool_call>` blocks into OpenAI `tool_calls` structures.
-- **Zero-Dependency Production Binary**: High-performance Rust binary with no heavy runtime dependencies.
+> **Note on Browser Usage**: The browser is used **only once** during `dragoman login` to capture session cookies and the anti-CSRF token (`SNlM0e`). Once captured, the browser is terminated and never needed during server execution.
 
 ---
 
 ## Quickstart
 
-### 1. Build the Binary
+### 1. Build from Source
+
+Ensure you have Rust (edition 2024 / 1.85+) installed:
+
 ```bash
+git clone https://github.com/khoipm/dragoman.git
+cd dragoman
 cargo build --release
 ```
-The binary will be generated at `./target/release/dragoman` (or run directly with `cargo run --`).
 
-### 2. Log in with your Google AI Pro Account
-Run the launcher once to open the dedicated browser profile:
-```bash
-./target/release/dragoman launch
-```
-In the browser window that opens:
-1. Navigate to [gemini.google.com](https://gemini.google.com).
-2. Log in with your Google account (`your-account@gmail.com`).
-3. Verify that your Gemini 4 Argon model is active.
-4. Your login session is saved in `~/.config/dragoman/chrome_profile` for future runs.
+The compiled binary will be placed at `./target/release/dragoman`.
 
-### 3. Check Status
-Verify that the browser CDP interface and Gemini tab are connected:
+### 2. One-Time Authentication (`login`)
+
+Run the login command to authenticate with your Google AI Pro account:
+
 ```bash
-./target/release/dragoman status
+./target/release/dragoman login
 ```
 
-### 4. Start the Proxy Server
+1. Chrome will launch automatically with remote debugging.
+2. Navigate to [gemini.google.com](https://gemini.google.com) and log in with your Google account.
+3. Once logged in, Dragoman automatically extracts the session tokens and saves them to `~/.config/dragoman/session.json`.
+4. Close Chrome. You are now fully authenticated.
+
+### 3. Verify Direct RPC Connection
+
+Test the direct HTTP connection to Gemini 4 Argon without launching any browser:
+
+```bash
+./target/release/dragoman test-rpc "Say hello and confirm you are Gemini 4 Argon."
+```
+
+### 4. Start the Standalone Proxy Server
+
+Launch the OpenAI-compatible proxy server:
+
 ```bash
 ./target/release/dragoman serve --port 8080
 ```
 
+By default, the server listens on `http://127.0.0.1:8080`.
+
 ---
 
-## Configuring External Coding Agents
+## Agent Configuration
 
-Point any OpenAI-compatible coding tool to Dragoman:
+Configure your external AI coding tool to use Dragoman:
 
 | Setting | Value |
 | :--- | :--- |
 | **API Base URL** | `http://127.0.0.1:8080/v1` |
 | **Model** | `gemini-4-argon` |
-| **API Key** | `dragoman-local` (any dummy value) |
+| **API Key** | `dragoman-local` (any arbitrary string) |
 
-### Example with `curl`
+### Example: `curl` Non-Streaming
+
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gemini-4-argon",
-    "messages": [{"role": "user", "content": "Write a quick Rust hello-world"}],
+    "messages": [
+      {"role": "user", "content": "Explain the role of a dragoman in 1 sentence."}
+    ],
+    "stream": false
+  }'
+```
+
+### Example: `curl` Streaming (SSE)
+
+```bash
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-4-argon",
+    "messages": [
+      {"role": "user", "content": "Write a Rust function that checks for prime numbers."}
+    ],
     "stream": true
   }'
 ```
 
 ---
 
-## Repository Structure
+## CLI Reference
 
-- `src/`: Production Rust implementation.
-  - `src/browser/`: Chrome launcher and CDP WebSocket client.
-  - `src/openai/`: OpenAI API type definitions and SSE schemas.
-  - `src/proxy/`: Axum HTTP server and prompt/tool translation engine.
-  - `src/main.rs`: Command-line interface (`serve`, `launch`, `status`).
-- `python/`: Python prototyping and inspection environment.
+```text
+Usage: dragoman [COMMAND]
+
+Commands:
+  serve     Start the standalone OpenAI-compatible proxy server (no browser needed)
+  login     Perform one-time browser login to extract and save session credentials
+  test-rpc  Test direct native HTTP RPC without browser
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+---
+
+## Project Structure
+
+```text
+dragoman/
+├── Cargo.toml          # Rust crate manifest
+├── LICENSE             # MIT License
+├── README.md           # Documentation
+└── src/
+    ├── main.rs         # CLI entry point (serve, login, test-rpc)
+    ├── browser/        # Chrome launcher & CDP client (used only during login)
+    │   ├── cdp.rs
+    │   ├── launcher.rs
+    │   └── mod.rs
+    ├── openai/         # OpenAI API data structures and schemas
+    │   ├── mod.rs
+    │   └── types.rs
+    ├── proxy/          # Axum HTTP proxy & agentic tool translator
+    │   ├── mod.rs
+    │   ├── server.rs
+    │   └── translator.rs
+    ├── session.rs      # Session credential persistence (~/.config/dragoman/session.json)
+    └── web/            # Direct HTTP/2 StreamGenerate RPC client
+        ├── client.rs
+        └── mod.rs
+```
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
