@@ -1,15 +1,33 @@
-# Python-generated files
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Dragoman session & credentials
+session.json
+*.session.json
+*.cookie
+*.cookies
+.env
+.env.*
+!*.env.example
+
+# Python caches and virtual environments
 __pycache__/
 *.py[oc]
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+.venv/
+.pytest_cache/
 
-# Virtual environments
-.venv
+# Editor and OS cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
 
-
-# Added by cargo
-
-/target
+# Logs
+*.log
