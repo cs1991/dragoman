@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build and Release Binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies (OpenSSL)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Build release binary
+        run: cargo build --release --verbose
+
+      - name: Package release assets
+        run: |
+          TAG_NAME="${{ github.ref_name }}"
+          if [ -z "$TAG_NAME" ] || [[ "$TAG_NAME" == "master" ]] || [[ "$TAG_NAME" == "main" ]]; then
+            TAG_NAME="${{ inputs.tag }}"
+          fi
+          ASSET_NAME="dragoman-${TAG_NAME}-x86_64-unknown-linux-gnu"
+          mkdir -p "$ASSET_NAME"
+          cp target/release/dragoman "$ASSET_NAME/"
+          cp README.md LICENSE "$ASSET_NAME/"
+          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
+          sha256sum "${ASSET_NAME}.tar.gz" > "${ASSET_NAME}.tar.gz.sha256"
+          echo "ASSET_ARCHIVE=${ASSET_NAME}.tar.gz" >> $GITHUB_ENV
+          echo "ASSET_CHECKSUM=${ASSET_NAME}.tar.gz.sha256" >> $GITHUB_ENV
+          echo "RELEASE_TAG=${TAG_NAME}" >> $GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Dragoman ${{ env.RELEASE_TAG }}
+          files: |
+            ${{ env.ASSET_ARCHIVE }}
+            ${{ env.ASSET_CHECKSUM }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
