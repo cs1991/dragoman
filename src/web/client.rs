@@ -39,7 +39,11 @@ fn transport_error(action: &str, error: &reqwest::Error) -> String {
 impl GeminiWebClient {
     pub fn new(session: SessionData) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(180))
+            // StreamGenerate can stay silent while Gemini analyzes a video.
+            // A total-request timeout aborts healthy long-running generations,
+            // so bound only connection setup and stalled reads.
+            .connect_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(900))
             .build()
             .unwrap_or_default();
 
