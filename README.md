@@ -204,6 +204,10 @@ Streaming requests, `input_video` parts and `file` parts use the same upload pat
 
 Media parts without a usable source return HTTP 400. This prevents base64 payloads or attachment objects from becoming oversized prompt text.
 
+Clients that omit the part `type` field still work when the part carries `image_url`, `video_url`, `input_image`, `input_video`, `file`, `input_file`, or a `source` object with `media_type`. A data URL embedded in plain message text is lifted out of the prompt, uploaded, and replaced with `[attached image]`, `[attached video]`, or `[attached file]`. The request log prints `Request shape` with part types, text length, and the number of inline media items, never the payload bytes.
+
+The proxy clears its stored `conversation_id` and `response_id` when a turn fails or returns no text, then retries once with a fresh conversation. This removes the stuck state that follows an aborted or stalled Gemini turn. The stream watchdog aborts a turn after 120 seconds without upstream data and defaults can be changed with `DRAGOMAN_STREAM_IDLE_TIMEOUT_SECS`.
+
 The Gemini account must accept the video upload notice once. Send one video from `gemini.google.com` if a video request is blocked.
 
 ---

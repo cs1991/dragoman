@@ -117,6 +117,7 @@ async fn chat_completions(
     };
 
     info!("Received chat completion request for model: {}", req.model);
+    info!("Request shape: {}", req.describe_shape());
 
     let unsupported = req.unsupported_media_parts();
     if !unsupported.is_empty() {
@@ -338,12 +339,16 @@ async fn chat_completions(
             .keep_alive(KeepAlive::default())
             .into_response()
     } else {
+        // The non-streaming response only needs the final text. Drain deltas so
+        // a long answer cannot block the upstream reader on a full channel.
+        let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
         match state
             .web_client
             .send_prompt_stream(&prompt, &files, delta_tx)
             .await
         {
             Ok(full_output) => {
+                drain.abort();
                 let (text_opt, tool_calls_opt) = PromptTranslator::parse_response(&full_output);
                 let finish_reason = if tool_calls_opt.is_some() {
                     "tool_calls".to_string()
@@ -380,6 +385,7 @@ async fn chat_completions(
                 Json(response).into_response()
             }
             Err(e) => {
+                drain.abort();
                 error!("Generation failed: {}", e);
                 openai_error(
                     StatusCode::INTERNAL_SERVER_ERROR,

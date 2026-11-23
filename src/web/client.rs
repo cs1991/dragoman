@@ -23,6 +23,35 @@ pub struct GeminiWebClient {
     http: reqwest::Client,
 }
 
+struct StreamAttempt {
+    text: String,
+    error: Option<String>,
+    chunks: usize,
+}
+
+impl StreamAttempt {
+    fn failed(error: String) -> Self {
+        Self {
+            text: String::new(),
+            error: Some(error),
+            chunks: 0,
+        }
+    }
+}
+
+fn idle_timeout() -> Duration {
+    std::env::var("DRAGOMAN_STREAM_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(120))
+}
+
+fn is_context_retryable(error: &str) -> bool {
+    error.contains("stalled") || error.contains("empty response")
+}
+
 fn transport_error(action: &str, error: &reqwest::Error) -> String {
     let detail = if error.is_timeout() {
         "The connection or response timed out. Check your network and proxy settings."
@@ -220,6 +249,73 @@ impl GeminiWebClient {
         files: &[UploadedFile],
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
+        let had_context = {
+            let session = self.session.lock().await;
+            session.conversation_id.is_some() || session.response_id.is_some()
+        };
+
+        let first = self.stream_attempt(prompt, files, delta_tx.clone()).await;
+        if first.error.is_none() && !first.text.trim().is_empty() {
+            return Ok(first.text);
+        }
+
+        let streamed_text = !first.text.is_empty();
+        let first_error = first
+            .error
+            .clone()
+            .unwrap_or_else(|| "Gemini Web returned an empty response".to_string());
+        info!(
+            "Gemini Web attempt ended with {} chunks and {} characters: {}",
+            first.chunks,
+            first.text.chars().count(),
+            first_error
+        );
+        self.reset_conversation("failed Gemini Web turn").await;
+
+        if had_context && !streamed_text && is_context_retryable(&first_error) {
+            info!(
+                "Retrying Gemini Web request once with a fresh conversation after: {}",
+                first_error
+            );
+            let second = self.stream_attempt(prompt, files, delta_tx.clone()).await;
+            if second.error.is_none() && !second.text.trim().is_empty() {
+                return Ok(second.text);
+            }
+            self.reset_conversation("failed Gemini Web retry").await;
+            let second_error = second
+                .error
+                .unwrap_or_else(|| "Gemini Web returned an empty response".to_string());
+            let _ = delta_tx.send(Err(second_error.clone())).await;
+            return Err(second_error);
+        }
+
+        let _ = delta_tx.send(Err(first_error.clone())).await;
+        Err(first_error)
+    }
+
+    async fn reset_conversation(&self, reason: &str) {
+        let mut session = self.session.lock().await;
+        if session.conversation_id.is_none()
+            && session.response_id.is_none()
+            && session.choice_id.is_none()
+        {
+            return;
+        }
+        info!("Clearing Gemini conversation context: {}", reason);
+        session.conversation_id = None;
+        session.response_id = None;
+        session.choice_id = None;
+        if let Err(error) = session.save() {
+            tracing::error!("Could not persist cleared Gemini conversation: {}", error);
+        }
+    }
+
+    async fn stream_attempt(
+        &self,
+        prompt: &str,
+        files: &[UploadedFile],
+        delta_tx: mpsc::Sender<Result<String, String>>,
+    ) -> StreamAttempt {
         let (snlm0e, f_sid, bl, cookie, conv_id, resp_id) = {
             let s = self.session.lock().await;
             (
@@ -295,16 +391,14 @@ impl GeminiWebClient {
             Ok(resp) => resp,
             Err(e) => {
                 let err_msg = transport_error("Gemini Web request failed", &e);
-                let _ = delta_tx.send(Err(err_msg.clone())).await;
-                return Err(err_msg);
+                return StreamAttempt::failed(err_msg);
             }
         };
 
         let status = response.status();
         if !status.is_success() {
             let err_msg = format!("Gemini Web returned HTTP {}", status.as_u16());
-            let _ = delta_tx.send(Err(err_msg.clone())).await;
-            return Err(err_msg);
+            return StreamAttempt::failed(err_msg);
         }
         info!("Gemini Web response status: {}", status.as_u16());
 
@@ -312,12 +406,44 @@ impl GeminiWebClient {
         let mut full_text = String::new();
         let mut line_buffer = String::new();
         let mut first_chunk = true;
+        let mut chunks = 0usize;
+        let idle = idle_timeout();
 
         let mut new_conv_id: Option<String> = None;
         let mut new_resp_id: Option<String> = None;
         let mut new_choice_id: Option<String> = None;
 
-        while let Some(chunk_res) = stream.next().await {
+        loop {
+            if delta_tx.is_closed() {
+                let err_msg = "Client closed the response stream".to_string();
+                info!("{}", err_msg);
+                return StreamAttempt {
+                    text: full_text,
+                    error: Some(err_msg),
+                    chunks,
+                };
+            }
+
+            let next = match tokio::time::timeout(idle, stream.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    let err_msg = format!(
+                        "Gemini Web stream stalled: no data for {} seconds after {} chunks",
+                        idle.as_secs(),
+                        chunks
+                    );
+                    return StreamAttempt {
+                        text: full_text,
+                        error: Some(err_msg),
+                        chunks,
+                    };
+                }
+            };
+
+            let Some(chunk_res) = next else {
+                break;
+            };
+            chunks += 1;
             let chunk = match chunk_res {
                 Ok(c) => {
                     if first_chunk {
@@ -328,8 +454,11 @@ impl GeminiWebClient {
                 }
                 Err(e) => {
                     let err_msg = transport_error("Gemini Web stream read failed", &e);
-                    let _ = delta_tx.send(Err(err_msg.clone())).await;
-                    return Err(err_msg);
+                    return StreamAttempt {
+                        text: full_text,
+                        error: Some(err_msg),
+                        chunks,
+                    };
                 }
             };
             let chunk_str = String::from_utf8_lossy(&chunk);
@@ -379,10 +508,15 @@ impl GeminiWebClient {
         }
 
         info!(
-            "Gemini Web stream completed with {} characters",
-            full_text.chars().count()
+            "Gemini Web stream completed with {} characters in {} chunks",
+            full_text.chars().count(),
+            chunks
         );
-        Ok(full_text)
+        StreamAttempt {
+            text: full_text,
+            error: None,
+            chunks,
+        }
     }
 
     pub async fn upload_media(

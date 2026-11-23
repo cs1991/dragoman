@@ -433,3 +433,119 @@ async fn rejects_oversized_attachments() {
 
     assert!(matches!(error, UploadError::TooLarge(_)));
 }
+
+fn inline_payload() -> String {
+    "A".repeat(256)
+}
+
+#[test]
+fn extracts_inline_data_url_from_string_content() {
+    let payload = inline_payload();
+    let prompt = format!("描述这张图片 data:image/png;base64,{payload} 谢谢");
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-argon",
+        "messages": [{ "role": "user", "content": prompt }]
+    }))
+    .unwrap();
+
+    let media = request.collect_media();
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].kind, MediaKind::Image);
+    assert_eq!(media[0].mime_type.as_deref(), Some("image/png"));
+    assert!(matches!(media[0].source, MediaSource::DataUrl(_)));
+
+    let rendered = request.messages[0].content_as_str();
+    assert!(rendered.contains("[attached image]"));
+    assert!(!rendered.contains("base64"));
+    assert!(!rendered.contains(&payload));
+}
+
+#[test]
+fn extracts_inline_data_url_from_text_part() {
+    let payload = inline_payload();
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-argon",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": format!("看看这个视频 data:video/mp4;base64,{payload}")}
+            ]
+        }]
+    }))
+    .unwrap();
+
+    let media = request.collect_media();
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].kind, MediaKind::Video);
+    assert!(
+        request.messages[0]
+            .content_as_str()
+            .contains("[attached video]")
+    );
+}
+
+#[test]
+fn extracts_typeless_image_url_part() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-argon",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"image_url": {"url": "file:///D:/face/11.png"}}
+            ]
+        }]
+    }))
+    .unwrap();
+
+    let media = request.collect_media();
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].kind, MediaKind::Image);
+    assert_eq!(
+        media[0].source,
+        MediaSource::FilePath("file:///D:/face/11.png".to_string())
+    );
+}
+
+#[test]
+fn extracts_typeless_source_base64_part() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-argon",
+        "messages": [{
+            "role": "user",
+            "content": [{
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "QUJD"
+                }
+            }]
+        }]
+    }))
+    .unwrap();
+
+    let media = request.collect_media();
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].kind, MediaKind::Image);
+    assert_eq!(media[0].mime_type.as_deref(), Some("image/png"));
+    assert_eq!(
+        media[0].source,
+        MediaSource::DataUrl("data:image/png;base64,QUJD".to_string())
+    );
+}
+
+#[test]
+fn request_shape_does_not_leak_base64() {
+    let payload = inline_payload();
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-argon",
+        "messages": [{
+            "role": "user",
+            "content": format!("图片 data:image/png;base64,{payload}")
+        }]
+    }))
+    .unwrap();
+
+    let shape = request.describe_shape();
+    assert!(shape.contains("inline media"));
+    assert!(!shape.contains(&payload));
+}
