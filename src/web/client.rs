@@ -4,7 +4,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::session::SessionData;
 
@@ -19,6 +19,19 @@ pub struct StreamChunkPayload {
 pub struct GeminiWebClient {
     session: Arc<Mutex<SessionData>>,
     http: reqwest::Client,
+}
+
+fn transport_error(action: &str, error: &reqwest::Error) -> String {
+    let detail = if error.is_timeout() {
+        "The connection or response timed out. Check your network and proxy settings."
+    } else if error.is_connect() {
+        "The connection failed. Check your network and system HTTPS proxy."
+    } else if error.is_redirect() {
+        "Gemini Web returned an unexpected redirect. Check the proxy or sign in again."
+    } else {
+        "The HTTPS request did not complete."
+    };
+    format!("{action}: {detail}")
 }
 
 impl GeminiWebClient {
@@ -215,7 +228,8 @@ impl GeminiWebClient {
             REFERER,
             HeaderValue::from_static("https://gemini.google.com/"),
         );
-        if let Ok(cookie_val) = HeaderValue::from_str(&cookie) {
+        if let Ok(mut cookie_val) = HeaderValue::from_str(&cookie) {
+            cookie_val.set_sensitive(true);
             headers.insert(COOKIE, cookie_val);
         }
 
@@ -231,7 +245,7 @@ impl GeminiWebClient {
         {
             Ok(resp) => resp,
             Err(e) => {
-                let err_msg = format!("Direct RPC request failed: {}", e);
+                let err_msg = transport_error("Gemini Web request failed", &e);
                 let _ = delta_tx.send(Err(err_msg.clone())).await;
                 return Err(err_msg);
             }
@@ -239,9 +253,7 @@ impl GeminiWebClient {
 
         let status = response.status();
         if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
-            error!("Upstream Gemini returned HTTP {}: {}", status, error_text);
-            let err_msg = format!("Gemini Web returned HTTP {}: {}", status, error_text);
+            let err_msg = format!("Gemini Web returned HTTP {}", status.as_u16());
             let _ = delta_tx.send(Err(err_msg.clone())).await;
             return Err(err_msg);
         }
@@ -258,7 +270,7 @@ impl GeminiWebClient {
             let chunk = match chunk_res {
                 Ok(c) => c,
                 Err(e) => {
-                    let err_msg = format!("Stream read error: {}", e);
+                    let err_msg = transport_error("Gemini Web stream read failed", &e);
                     let _ = delta_tx.send(Err(err_msg.clone())).await;
                     return Err(err_msg);
                 }
@@ -354,5 +366,30 @@ impl GeminiWebClient {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn transport_errors_do_not_expose_request_urls() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/rpc?private=fixture",
+            listener.local_addr().unwrap()
+        );
+        tokio::spawn(async move { drop(listener.accept().await.unwrap()) });
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(error.url().is_some_and(|url| url.query().is_some()));
+        let message = super::transport_error("Gemini Web request failed", &error);
+        assert!(message.starts_with("Gemini Web request failed:"));
+        assert!(!message.contains("http") && !message.contains("fixture"));
     }
 }

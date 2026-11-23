@@ -98,10 +98,13 @@ impl BrowserLauncher {
     }
 
     pub async fn is_cdp_ready(port: u16) -> bool {
-        let client = reqwest::Client::builder()
+        let Ok(client) = reqwest::Client::builder()
+            .no_proxy()
             .timeout(Duration::from_secs(1))
             .build()
-            .unwrap_or_default();
+        else {
+            return false;
+        };
 
         let url = format!("http://127.0.0.1:{}/json/version", port);
         match client.get(&url).send().await {

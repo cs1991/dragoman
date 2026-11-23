@@ -182,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::TestRpc { prompt } => {
             let session =
                 SessionData::load().map_err(|e| format!("Could not load session: {}", e))?;
-            println!("Loaded session: bl={}, model={}", session.bl, session.model);
+            println!("Loaded session for model {}", session.model);
             let client = GeminiWebClient::new(session);
             let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 

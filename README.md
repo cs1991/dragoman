@@ -105,6 +105,8 @@ The script stops running instances from `target/release` and `dist/dragoman-wind
 
 In the output folder, double-click `login.cmd` for first-time setup. Finish signing in to Gemini in Chrome. If `login.cmd` did not save a session on the first run, leave Chrome open and run it again. After it reports success, close that Chrome window and double-click `start.cmd`. The startup window shows the error if the proxy exits.
 
+Dragoman honors the Windows system proxy for its connection to Gemini. If Gemini opens in Chrome but Dragoman reports a connection error, check that the proxy is running and enabled in Windows Settings. A proxy set only inside Chrome does not apply to Dragoman. When starting Dragoman from a terminal, you can also set `HTTPS_PROXY` for that process.
+
 ---
 
 ## Agent Configuration

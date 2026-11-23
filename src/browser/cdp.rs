@@ -37,7 +37,10 @@ pub struct CdpClient {
 
 impl CdpClient {
     pub async fn connect_to_gemini(cdp_port: u16) -> Result<Self, String> {
-        let http_client = reqwest::Client::new();
+        let http_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|e| format!("Could not initialize the local CDP client: {e}"))?;
         let list_url = format!("http://127.0.0.1:{}/json/list", cdp_port);
 
         let targets: Vec<CdpTarget> = match http_client.get(&list_url).send().await {
