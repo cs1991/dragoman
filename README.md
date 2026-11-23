@@ -95,10 +95,10 @@ The server listens on `http://127.0.0.1:8080`.
 
 On Windows, `dragoman.exe login` looks for Chrome in the standard installation directories and on `PATH`. It creates `chrome_profile` beside `dragoman.exe`, so place the executable in a writable directory. If Chrome is already listening on the selected CDP port with an older profile, close that Chrome instance before logging in again. The separate `session.json` file still uses the existing session location.
 
-Run the packaging script from PowerShell with Cargo on `PATH`.
+Run the packaging script from Windows Command Prompt with Cargo on `PATH` or in the default Rustup location.
 
-```powershell
-.\scripts\package.ps1
+```bat
+.\scripts\package.cmd
 ```
 
 The script stops running instances from `target/release` and `dist/dragoman-windows` before building. It copies the executable, README, and license into `dist/dragoman-windows` without making a ZIP. It leaves any existing browser profiles in both directories intact.
