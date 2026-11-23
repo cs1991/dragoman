@@ -28,18 +28,32 @@ impl PromptTranslator {
 
         // 2. Format conversation history
         for msg in &req.messages {
+            let content = msg.content_as_str();
             match msg.role.as_str() {
                 "system" => {
+                    if content.trim().is_empty() {
+                        continue;
+                    }
                     prompt.push_str("[System Instruction]\n");
-                    prompt.push_str(&msg.content_as_str());
+                    prompt.push_str(&content);
                     prompt.push_str("\n\n");
                 }
                 "user" => {
+                    if content.trim().is_empty() {
+                        continue;
+                    }
                     prompt.push_str("[User]\n");
-                    prompt.push_str(&msg.content_as_str());
+                    prompt.push_str(&content);
                     prompt.push_str("\n\n");
                 }
                 "assistant" => {
+                    let has_tool_calls = msg
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty());
+                    if content.trim().is_empty() && !has_tool_calls {
+                        continue;
+                    }
                     prompt.push_str("[Assistant]\n");
                     if let Some(tool_calls) = &msg.tool_calls {
                         for call in tool_calls {
@@ -49,24 +63,29 @@ impl PromptTranslator {
                             ));
                         }
                     }
-                    let content = msg.content_as_str();
-                    if !content.is_empty() {
+                    if !content.trim().is_empty() {
                         prompt.push_str(&content);
                     }
                     prompt.push_str("\n\n");
                 }
                 "tool" => {
+                    if content.trim().is_empty() {
+                        continue;
+                    }
                     let tool_id = msg.tool_call_id.as_deref().unwrap_or("unknown");
                     let tool_name = msg.name.as_deref().unwrap_or("unknown_tool");
                     prompt.push_str(&format!(
                         "[Tool Result for {} (ID: {})]\n",
                         tool_name, tool_id
                     ));
-                    prompt.push_str(&msg.content_as_str());
+                    prompt.push_str(&content);
                     prompt.push_str("\n\n");
                 }
                 _ => {
-                    prompt.push_str(&format!("[{}]\n{}\n\n", msg.role, msg.content_as_str()));
+                    if content.trim().is_empty() {
+                        continue;
+                    }
+                    prompt.push_str(&format!("[{}]\n{}\n\n", msg.role, content));
                 }
             }
         }
@@ -207,5 +226,22 @@ mod tests {
         let (text, tool_calls) = PromptTranslator::parse_response(input);
         assert_eq!(text, Some(input.to_string()));
         assert!(tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_empty_user_content_does_not_emit_role_header() {
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "gemini-4-argon",
+            "messages": [{
+                "role": "user",
+                "content": {
+                    "type": "video",
+                    "foo": "bar"
+                }
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(PromptTranslator::build_gemini_prompt(&request), "");
     }
 }

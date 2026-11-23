@@ -1,5 +1,7 @@
 use axum::{Router, body::Bytes, extract::State, http::HeaderMap, routing::post};
-use dragoman::openai::types::{ChatCompletionRequest, MediaAttachment, MediaKind, MediaSource};
+use dragoman::openai::types::{
+    ChatCompletionRequest, ChatMessage, MediaAttachment, MediaKind, MediaSource,
+};
 use dragoman::web::GeminiWebClient;
 use dragoman::web::upload::{UploadError, UploadedFile, upload_to_endpoint};
 use serde_json::json;
@@ -195,6 +197,111 @@ fn extracts_object_content_and_normalizes_uploaded_file_ids() {
         media[1].source,
         MediaSource::UploadedPath("/contrib_service/ttl_1d/no_leading_slash".to_string())
     );
+}
+
+#[test]
+fn extracts_source_objects_for_video_parts() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-argon",
+        "messages": [{
+            "role": "user",
+            "content": {
+                "type": "video",
+                "source": {
+                    "type": "base64",
+                    "media_type": "video/mp4",
+                    "data": "RFJBR09NQU4="
+                }
+            }
+        }]
+    }))
+    .unwrap();
+
+    let media = request.collect_media();
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].kind, MediaKind::Video);
+    assert_eq!(media[0].mime_type.as_deref(), Some("video/mp4"));
+    assert_eq!(
+        media[0].source,
+        MediaSource::DataUrl("data:video/mp4;base64,RFJBR09NQU4=".to_string())
+    );
+}
+
+#[test]
+fn extracts_top_level_file_ids_and_source_urls() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-argon",
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "file",
+                    "file_id": "contrib_service/ttl_1d/top_level",
+                    "filename": "top-level.mp4"
+                }
+            },
+            {
+                "role": "user",
+                "content": {
+                    "type": "video",
+                    "source": {
+                        "type": "url",
+                        "url": "https://example.com/video.mp4"
+                    }
+                }
+            }
+        ]
+    }))
+    .unwrap();
+
+    let media = request.collect_media();
+    assert_eq!(media.len(), 2);
+    assert_eq!(
+        media[0].source,
+        MediaSource::UploadedPath("/contrib_service/ttl_1d/top_level".to_string())
+    );
+    assert_eq!(media[0].kind, MediaKind::Video);
+    assert_eq!(
+        media[1].source,
+        MediaSource::Url("https://example.com/video.mp4".to_string())
+    );
+}
+
+#[test]
+fn media_objects_do_not_become_prompt_text() {
+    let message: ChatMessage = serde_json::from_value(json!({
+        "role": "user",
+        "content": {
+            "type": "video",
+            "source": {
+                "type": "base64",
+                "media_type": "video/mp4",
+                "data": "QUJD"
+            }
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(message.content_as_str(), "");
+}
+
+#[test]
+fn flags_unsupported_media_parts() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-argon",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Describe this video"},
+                {"type": "video", "foo": "bar"}
+            ]
+        }]
+    }))
+    .unwrap();
+
+    let unsupported = request.unsupported_media_parts();
+    assert_eq!(unsupported.len(), 1);
+    assert!(unsupported[0].contains("video"));
 }
 
 #[tokio::test]

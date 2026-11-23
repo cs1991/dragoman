@@ -306,10 +306,12 @@ impl GeminiWebClient {
             let _ = delta_tx.send(Err(err_msg.clone())).await;
             return Err(err_msg);
         }
+        info!("Gemini Web response status: {}", status.as_u16());
 
         let mut stream = response.bytes_stream();
         let mut full_text = String::new();
         let mut line_buffer = String::new();
+        let mut first_chunk = true;
 
         let mut new_conv_id: Option<String> = None;
         let mut new_resp_id: Option<String> = None;
@@ -317,7 +319,13 @@ impl GeminiWebClient {
 
         while let Some(chunk_res) = stream.next().await {
             let chunk = match chunk_res {
-                Ok(c) => c,
+                Ok(c) => {
+                    if first_chunk {
+                        info!("Gemini Web stream delivered its first chunk");
+                        first_chunk = false;
+                    }
+                    c
+                }
                 Err(e) => {
                     let err_msg = transport_error("Gemini Web stream read failed", &e);
                     let _ = delta_tx.send(Err(err_msg.clone())).await;
@@ -370,6 +378,10 @@ impl GeminiWebClient {
             let _ = s.save();
         }
 
+        info!(
+            "Gemini Web stream completed with {} characters",
+            full_text.chars().count()
+        );
         Ok(full_text)
     }
 

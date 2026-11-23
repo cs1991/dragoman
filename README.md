@@ -152,7 +152,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 ### Video and File Attachments
 
-`/v1/chat/completions` accepts `video_url`, `input_video`, `image_url` and `file` content parts. Each part can carry a data URL, an HTTP or HTTPS URL, an absolute local path, a `file://` URL, or an existing `/contrib_service/` upload path.
+`/v1/chat/completions` accepts `video_url`, `input_video`, `image_url` and `file` content parts. Each part can carry a data URL, an HTTP or HTTPS URL, an absolute local path, a `file://` URL, or an existing `/contrib_service/` upload path. Video and image parts also accept a `source` object with `media_type` plus `data`, `url`, or `file_id`.
 
 Local video file:
 
@@ -201,6 +201,8 @@ PY
 ```
 
 Streaming requests, `input_video` parts and `file` parts use the same upload path. A request carries at most 10 attachments. `--max-attachment-mb` sets the per-attachment size limit and defaults to 200.
+
+Media parts without a usable source return HTTP 400. This prevents base64 payloads or attachment objects from becoming oversized prompt text.
 
 The Gemini account must accept the video upload notice once. Send one video from `gemini.google.com` if a video request is blocked.
 

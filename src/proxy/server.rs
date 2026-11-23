@@ -27,6 +27,7 @@ pub struct AppState {
 }
 
 const MAX_ATTACHMENTS_PER_REQUEST: usize = 10;
+const MAX_PROMPT_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -117,7 +118,20 @@ async fn chat_completions(
 
     info!("Received chat completion request for model: {}", req.model);
 
+    let unsupported = req.unsupported_media_parts();
+    if !unsupported.is_empty() {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!(
+                "Unsupported attachment content part(s): {}. Use url, data, file_data, base64, file_id, or source.",
+                unsupported.join("; ")
+            ),
+        );
+    }
+
     let media = req.collect_media();
+    info!("Request attachments: {}", media.len());
     if media.len() > MAX_ATTACHMENTS_PER_REQUEST {
         return openai_error(
             StatusCode::BAD_REQUEST,
@@ -164,6 +178,28 @@ async fn chat_completions(
             prompt.push_str("\n\nPlease describe the attached file.");
         }
     }
+
+    if prompt.trim().is_empty() && files.is_empty() {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "The request contains no text or supported attachment.",
+        );
+    }
+
+    if prompt.len() > MAX_PROMPT_BYTES {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "The text prompt is too large. Send video, image or file bytes as attachment content parts.",
+        );
+    }
+
+    info!(
+        "Prompt characters: {}, uploaded attachments: {}",
+        prompt.chars().count(),
+        files.len()
+    );
 
     let is_stream = req.stream.unwrap_or(false);
     let request_model = req.model.clone();
