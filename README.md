@@ -224,6 +224,8 @@ Options:
 
 `serve --max-attachment-mb 200` changes the per-attachment size limit.
 
+`start.cmd` stops a previous Dragoman process using the same executable and port before it starts.
+
 ---
 
 ## Project Structure

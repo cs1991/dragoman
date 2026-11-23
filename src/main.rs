@@ -100,7 +100,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let addr = SocketAddr::from(([0, 0, 0, 0], port));
             info!("Dragoman listening on http://{}", addr);
 
-            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let listener = match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => listener,
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                    eprintln!(
+                        "Port {} is already in use. Stop the process using it or choose another port with --port.",
+                        port
+                    );
+                    std::process::exit(2);
+                }
+                Err(error) => return Err(error.into()),
+            };
             axum::serve(listener, router).await?;
         }
         Commands::Login { cdp_port } => {
