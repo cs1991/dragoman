@@ -32,3 +32,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local capture and scratch fixtures
+.tmp_pw/

@@ -29,6 +29,10 @@ enum Commands {
         /// Target model identifier reported to coding agents
         #[arg(short, long, default_value = "gemini-4-argon")]
         model: String,
+
+        /// Maximum attachment size in MiB for video, image and file parts
+        #[arg(long, default_value_t = 200)]
+        max_attachment_mb: u64,
     },
     /// Perform one-time browser login to extract and save session credentials
     Login {
@@ -56,11 +60,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command.unwrap_or(Commands::Serve {
         port: 8080,
         model: "gemini-4-argon".to_string(),
+        max_attachment_mb: 200,
     }) {
-        Commands::Serve { port, model } => {
+        Commands::Serve {
+            port,
+            model,
+            max_attachment_mb,
+        } => {
             println!("=======================================================");
             println!(" Dragoman - Native Gemini Web OpenAI Bridge");
             println!(" Target Model: {}", model);
+            println!(" Max Attachment: {} MiB", max_attachment_mb);
             println!(" Mode: Standalone HTTP/2 Direct RPC (Zero Browser Runtime)");
             println!(
                 " Proxy Endpoint: http://127.0.0.1:{}/v1/chat/completions",
@@ -83,6 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let app_state = Arc::new(AppState {
                 web_client,
                 default_model: model,
+                max_attachment_bytes: max_attachment_mb.saturating_mul(1024 * 1024),
             });
 
             let router = create_router(app_state);
@@ -201,7 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-            match client.send_prompt_stream(&prompt, tx).await {
+            match client.send_prompt_stream(&prompt, &[], tx).await {
                 Ok(full) => {
                     println!("\n\n--- Direct RPC Completed successfully ---");
                     println!("Total chars received: {}", full.len());

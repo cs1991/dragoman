@@ -20,6 +20,7 @@ async fn proxy_routes_do_not_require_or_check_an_api_key() {
     let state = Arc::new(AppState {
         web_client: Arc::new(web_client),
         default_model: "gemini-4-argon".to_string(),
+        max_attachment_bytes: 200 * 1024 * 1024,
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());

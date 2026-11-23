@@ -6,7 +6,9 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tracing::info;
 
+use crate::openai::types::MediaAttachment;
 use crate::session::SessionData;
+use crate::web::upload::{UploadError, UploadedFile, upload_attachment};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamChunkPayload {
@@ -63,8 +65,27 @@ impl GeminiWebClient {
         conv_id: Option<&str>,
         resp_id: Option<&str>,
     ) -> Vec<serde_json::Value> {
+        Self::build_stream_generate_payload_with_files(prompt, conv_id, resp_id, &[])
+    }
+
+    pub fn build_stream_generate_payload_with_files(
+        prompt: &str,
+        conv_id: Option<&str>,
+        resp_id: Option<&str>,
+        files: &[UploadedFile],
+    ) -> Vec<serde_json::Value> {
         let mut inner: Vec<serde_json::Value> = vec![serde_json::Value::Null; 99];
-        inner[0] = json!([prompt, 0, null, null, null, null, 0]);
+        let attachments = if files.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::Array(
+                files
+                    .iter()
+                    .map(|file| json!([[file.path.clone()], file.name.clone()]))
+                    .collect(),
+            )
+        };
+        inner[0] = json!([prompt, 0, null, attachments, null, null, 0]);
         inner[1] = json!(["en"]);
         if let Some(rid) = resp_id {
             inner[3] = json!(rid);
@@ -100,7 +121,16 @@ impl GeminiWebClient {
         conv_id: Option<&str>,
         resp_id: Option<&str>,
     ) -> String {
-        let inner = Self::build_stream_generate_payload(prompt, conv_id, resp_id);
+        Self::build_form_envelope_with_files(prompt, conv_id, resp_id, &[])
+    }
+
+    pub fn build_form_envelope_with_files(
+        prompt: &str,
+        conv_id: Option<&str>,
+        resp_id: Option<&str>,
+        files: &[UploadedFile],
+    ) -> String {
+        let inner = Self::build_stream_generate_payload_with_files(prompt, conv_id, resp_id, files);
         let inner_json = serde_json::to_string(&inner).unwrap_or_default();
         json!([null, inner_json]).to_string()
     }
@@ -183,6 +213,7 @@ impl GeminiWebClient {
     pub async fn send_prompt_stream(
         &self,
         prompt: &str,
+        files: &[UploadedFile],
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
         let (snlm0e, f_sid, bl, cookie, conv_id, resp_id) = {
@@ -208,7 +239,12 @@ impl GeminiWebClient {
             bl, f_sid, req_id
         );
 
-        let f_req = Self::build_form_envelope(prompt, conv_id.as_deref(), resp_id.as_deref());
+        let f_req = Self::build_form_envelope_with_files(
+            prompt,
+            conv_id.as_deref(),
+            resp_id.as_deref(),
+            files,
+        );
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -231,6 +267,15 @@ impl GeminiWebClient {
         if let Ok(mut cookie_val) = HeaderValue::from_str(&cookie) {
             cookie_val.set_sensitive(true);
             headers.insert(COOKIE, cookie_val);
+        }
+        if !files.is_empty() {
+            let jspb = format!(
+                "[\"{}\",1]",
+                uuid::Uuid::new_v4().to_string().to_uppercase()
+            );
+            if let Ok(value) = HeaderValue::from_str(&jspb) {
+                headers.insert("x-goog-ext-525005358-jspb", value);
+            }
         }
 
         info!("Sending native direct RPC to Gemini Web (StreamGenerate, Argon4p0)...");
@@ -322,6 +367,15 @@ impl GeminiWebClient {
         }
 
         Ok(full_text)
+    }
+
+    pub async fn upload_media(
+        &self,
+        media: &MediaAttachment,
+        max_bytes: u64,
+    ) -> Result<UploadedFile, UploadError> {
+        let cookie = self.session.lock().await.cookie.clone();
+        upload_attachment(&self.http, &cookie, media, max_bytes).await
     }
 
     async fn process_stream_line(

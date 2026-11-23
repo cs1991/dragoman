@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
     http::StatusCode,
     response::{
         IntoResponse, Response,
@@ -23,7 +23,10 @@ use crate::web::GeminiWebClient;
 pub struct AppState {
     pub web_client: Arc<GeminiWebClient>,
     pub default_model: String,
+    pub max_attachment_bytes: u64,
 }
+
+const MAX_ATTACHMENTS_PER_REQUEST: usize = 10;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
@@ -31,12 +34,22 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    let body_limit = usize::try_from(
+        state
+            .max_attachment_bytes
+            .saturating_mul(4)
+            .saturating_div(3)
+            .saturating_add(8 * 1024 * 1024),
+    )
+    .unwrap_or(usize::MAX);
+
     // The client API key is optional. Gemini authentication uses the saved session.
     Router::new()
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/health", get(health_check))
         .route("/", get(root_handler))
+        .layer(DefaultBodyLimit::max(body_limit))
         .layer(cors)
         .with_state(state)
 }
@@ -57,7 +70,7 @@ async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
 
     let models = vec![
@@ -89,11 +102,69 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<ChatCompletionRequest>,
-) -> Result<Response, (StatusCode, String)> {
+    payload: Result<Json<ChatCompletionRequest>, JsonRejection>,
+) -> Response {
+    let Json(req) = match payload {
+        Ok(payload) => payload,
+        Err(rejection) => {
+            return openai_error(
+                rejection.status(),
+                "invalid_request_error",
+                rejection.body_text(),
+            );
+        }
+    };
+
     info!("Received chat completion request for model: {}", req.model);
 
-    let prompt = PromptTranslator::build_gemini_prompt(&req);
+    let media = req.collect_media();
+    if media.len() > MAX_ATTACHMENTS_PER_REQUEST {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!(
+                "A request can contain at most {MAX_ATTACHMENTS_PER_REQUEST} video, image or file attachments"
+            ),
+        );
+    }
+
+    let mut files = Vec::with_capacity(media.len());
+    for attachment in &media {
+        match state
+            .web_client
+            .upload_media(attachment, state.max_attachment_bytes)
+            .await
+        {
+            Ok(file) => {
+                info!("Uploaded attachment: {}", file.name);
+                files.push(file);
+            }
+            Err(error) => {
+                let status =
+                    StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let error_type = if status == StatusCode::BAD_GATEWAY {
+                    "upstream_error"
+                } else {
+                    "invalid_request_error"
+                };
+                return openai_error(status, error_type, error.to_string());
+            }
+        }
+    }
+
+    let mut prompt = PromptTranslator::build_gemini_prompt(&req);
+    let has_user_text = req
+        .messages
+        .iter()
+        .any(|message| message.role == "user" && !message.content_as_str().trim().is_empty());
+    if !has_user_text && !files.is_empty() {
+        if prompt.trim().is_empty() {
+            prompt = "Please describe the attached file.".to_string();
+        } else {
+            prompt.push_str("\n\nPlease describe the attached file.");
+        }
+    }
+
     let is_stream = req.stream.unwrap_or(false);
     let request_model = req.model.clone();
 
@@ -103,14 +174,18 @@ async fn chat_completions(
         let stream_id = format!("chatcmpl-{}", Uuid::new_v4().simple());
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         // Spawn prompt submission and streaming task via direct native HTTP RPC
         let client = state.web_client.clone();
         let prompt_clone = prompt.clone();
+        let files_clone = files.clone();
         tokio::spawn(async move {
-            if let Err(e) = client.send_prompt_stream(&prompt_clone, delta_tx).await {
+            if let Err(e) = client
+                .send_prompt_stream(&prompt_clone, &files_clone, delta_tx)
+                .await
+            {
                 error!("Prompt stream execution error: {}", e);
             }
         });
@@ -223,11 +298,15 @@ async fn chat_completions(
             yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));
         };
 
-        Ok(Sse::new(sse_stream)
+        Sse::new(sse_stream)
             .keep_alive(KeepAlive::default())
-            .into_response())
+            .into_response()
     } else {
-        match state.web_client.send_prompt_stream(&prompt, delta_tx).await {
+        match state
+            .web_client
+            .send_prompt_stream(&prompt, &files, delta_tx)
+            .await
+        {
             Ok(full_output) => {
                 let (text_opt, tool_calls_opt) = PromptTranslator::parse_response(&full_output);
                 let finish_reason = if tool_calls_opt.is_some() {
@@ -241,7 +320,7 @@ async fn chat_completions(
                     object: "chat.completion".to_string(),
                     created: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or_default()
                         .as_secs(),
                     model: request_model,
                     choices: vec![ChatChoice {
@@ -262,15 +341,27 @@ async fn chat_completions(
                     }),
                 };
 
-                Ok(Json(response).into_response())
+                Json(response).into_response()
             }
             Err(e) => {
                 error!("Generation failed: {}", e);
-                Err((
+                openai_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
+                    "upstream_error",
                     format!("Generation failed: {}", e),
-                ))
+                )
             }
         }
     }
+}
+
+fn openai_error(status: StatusCode, error_type: &str, message: impl Into<String>) -> Response {
+    let payload = serde_json::json!({
+        "error": {
+            "message": message.into(),
+            "type": error_type,
+            "code": status.as_u16()
+        }
+    });
+    (status, Json(payload)).into_response()
 }

@@ -13,6 +13,7 @@
 - Zero browser runtime: Uses native HTTP/2 direct RPC (`StreamGenerate`). Chrome does not run in the background during normal use.
 - Standard OpenAI API compatibility: Implements `/v1/chat/completions`, `/v1/models`, and `/health`.
 - Real-time streaming: Server-Sent Events (SSE) deliver chunked token responses as they generate.
+- Attachment analysis: video, image and file content parts are uploaded and attached to the Gemini request.
 - Tool calling translation: Formats tool schemas into instructions and parses `<tool_call>` outputs into standard OpenAI `tool_calls` structures.
 - No API tokens required: Works with personal Google AI Pro subscriptions without Google Cloud billing.
 
@@ -149,6 +150,60 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
+### Video and File Attachments
+
+`/v1/chat/completions` accepts `video_url`, `input_video`, `image_url` and `file` content parts. Each part can carry a data URL, an HTTP or HTTPS URL, an absolute local path, a `file://` URL, or an existing `/contrib_service/` upload path.
+
+Local video file:
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-4-argon",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "Describe this video"},
+        {"type": "video_url", "video_url": {"url": "file:///D:/clips/demo.mp4"}}
+      ]
+    }]
+  }'
+```
+
+Base64 data URL with Python:
+
+```bash
+python - <<'PY'
+import base64
+import json
+import pathlib
+import urllib.request
+
+video = base64.b64encode(pathlib.Path("clip.mp4").read_bytes()).decode("ascii")
+body = {
+    "model": "gemini-4-argon",
+    "messages": [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this video"},
+            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video}"}},
+        ],
+    }],
+}
+request = urllib.request.Request(
+    "http://127.0.0.1:8080/v1/chat/completions",
+    data=json.dumps(body).encode(),
+    headers={"Content-Type": "application/json"},
+)
+print(urllib.request.urlopen(request, timeout=600).read().decode())
+PY
+```
+
+Streaming requests, `input_video` parts and `file` parts use the same upload path. A request carries at most 10 attachments. `--max-attachment-mb` sets the per-attachment size limit and defaults to 200.
+
+The Gemini account must accept the video upload notice once. Send one video from `gemini.google.com` if a video request is blocked.
+
 ---
 
 ## CLI Reference
@@ -166,6 +221,8 @@ Options:
   -h, --help     Print help
   -V, --version  Print version
 ```
+
+`serve --max-attachment-mb 200` changes the per-attachment size limit.
 
 ---
 
@@ -192,6 +249,7 @@ dragoman/
     ├── session.rs      # Session credential persistence
     └── web/            # Direct HTTP/2 StreamGenerate RPC client
         ├── client.rs
+        ├── upload.rs
         └── mod.rs
 ```
 
