@@ -101,7 +101,7 @@ Run the packaging script from PowerShell with Cargo on `PATH`.
 .\scripts\package.ps1
 ```
 
-The script stops running instances of the repository's `target/release/dragoman.exe` before building. It leaves `target/release/chrome_profile` intact. The output is `dist/dragoman-windows.zip` and contains only the executable, README, and license.
+The script stops running instances from `target/release` and `dist/dragoman-windows` before building. It copies the executable, README, and license into `dist/dragoman-windows` without making a ZIP. It leaves any existing browser profiles in both directories intact.
 
 ---
 
