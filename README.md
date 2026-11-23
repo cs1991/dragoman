@@ -89,7 +89,7 @@ Launch the proxy server:
 ./target/release/dragoman serve --port 8080
 ```
 
-The server listens on `http://127.0.0.1:8080`.
+Connect from the same machine at `http://127.0.0.1:8080`.
 
 ### Windows login and packaging
 
@@ -115,7 +115,9 @@ Point your AI coding tool to Dragoman with these settings:
 | :--- | :--- |
 | **API Base URL** | `http://127.0.0.1:8080/v1` |
 | **Model** | `gemini-4-argon` |
-| **API Key** | `dragoman-local` (or any string) |
+| **API Key** | Leave blank. If the client requires a value, use `dragoman-local`. |
+
+Dragoman accepts requests with or without an `Authorization` header and does not check the API key. The proxy still needs the Gemini session saved by `dragoman login`. It listens on all IPv4 interfaces, so keep the port behind your local firewall and do not forward it.
 
 ### Example: Non-Streaming Request
 

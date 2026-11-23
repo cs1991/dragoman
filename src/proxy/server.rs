@@ -31,6 +31,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // The client API key is optional. Gemini authentication uses the saved session.
     Router::new()
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
