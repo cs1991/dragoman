@@ -91,6 +91,18 @@ Launch the proxy server:
 
 The server listens on `http://127.0.0.1:8080`.
 
+### Windows login and packaging
+
+On Windows, `dragoman.exe login` looks for Chrome in the standard installation directories and on `PATH`. It creates `chrome_profile` beside `dragoman.exe`, so place the executable in a writable directory. If Chrome is already listening on the selected CDP port with an older profile, close that Chrome instance before logging in again. The separate `session.json` file still uses the existing session location.
+
+Run the packaging script from PowerShell with Cargo on `PATH`.
+
+```powershell
+.\scripts\package.ps1
+```
+
+The script stops running instances of the repository's `target/release/dragoman.exe` before building. It leaves `target/release/chrome_profile` intact. The output is `dist/dragoman-windows.zip` and contains only the executable, README, and license.
+
 ---
 
 ## Agent Configuration

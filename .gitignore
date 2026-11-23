@@ -3,6 +3,7 @@ target/
 **/*.rs.bk
 
 # Dragoman session & credentials
+chrome_profile/
 session.json
 *.session.json
 *.cookie

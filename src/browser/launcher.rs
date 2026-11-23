@@ -17,7 +17,11 @@ impl BrowserLauncher {
 
         info!("Launching browser for authentication on port {}...", port);
 
-        let data_dir = profile_dir.unwrap_or_else(dirs_profile_dir);
+        let data_dir = match profile_dir {
+            Some(dir) => dir,
+            None => default_profile_dir()
+                .map_err(|e| format!("Failed to locate Chrome profile dir: {e}"))?,
+        };
 
         std::fs::create_dir_all(&data_dir)
             .map_err(|e| format!("Failed to create profile dir: {}", e))?;
@@ -75,27 +79,21 @@ impl BrowserLauncher {
         port_flag: &str,
         user_data_flag: &str,
     ) -> std::io::Result<std::process::Child> {
-        let binaries = [
-            "google-chrome-stable",
-            "google-chrome",
-            "chromium-browser",
-            "chromium",
-        ];
-        for bin in binaries {
-            if let Ok(child) = Command::new(bin)
+        for bin in chrome_binaries() {
+            if let Ok(child) = Command::new(&bin)
                 .args([port_flag, user_data_flag, "https://gemini.google.com/app"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
             {
-                info!("Launched native browser binary: {}", bin);
+                info!("Launched native browser binary: {}", bin.display());
                 return Ok(child);
             }
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "No Chrome/Chromium binary found in PATH",
+            "No Chrome/Chromium binary found in the usual install directories or PATH",
         ))
     }
 
@@ -113,10 +111,56 @@ impl BrowserLauncher {
     }
 }
 
-fn dirs_profile_dir() -> PathBuf {
+fn chrome_binaries() -> impl Iterator<Item = PathBuf> {
+    #[cfg(windows)]
+    let installed = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| PathBuf::from(dir).join("Google/Chrome/Application/chrome.exe"))
+        .chain([PathBuf::from("chrome.exe")]);
+    #[cfg(not(windows))]
+    let installed = std::iter::empty();
+
+    installed.chain(
+        [
+            "google-chrome-stable",
+            "google-chrome",
+            "chromium-browser",
+            "chromium",
+        ]
+        .into_iter()
+        .map(PathBuf::from),
+    )
+}
+
+#[cfg(windows)]
+fn default_profile_dir() -> std::io::Result<PathBuf> {
+    std::env::current_exe()?
+        .parent()
+        .map(|dir| dir.join("chrome_profile"))
+        .ok_or_else(|| std::io::Error::other("The executable has no parent directory"))
+}
+
+#[cfg(not(windows))]
+fn default_profile_dir() -> std::io::Result<PathBuf> {
     if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config/dragoman/chrome_profile")
+        Ok(PathBuf::from(home).join(".config/dragoman/chrome_profile"))
     } else {
-        PathBuf::from(".dragoman_profile")
+        Ok(PathBuf::from(".dragoman_profile"))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    #[test]
+    fn profile_is_next_to_the_running_executable() -> std::io::Result<()> {
+        let profile = super::default_profile_dir()?;
+        assert_eq!(
+            profile.file_name(),
+            Some(std::ffi::OsStr::new("chrome_profile"))
+        );
+        assert_eq!(profile.parent(), std::env::current_exe()?.parent());
+        Ok(())
     }
 }
