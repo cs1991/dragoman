@@ -93,7 +93,7 @@ The server listens on `http://127.0.0.1:8080`.
 
 ### Windows login and packaging
 
-On Windows, `dragoman.exe login` looks for Chrome in the standard installation directories and on `PATH`. It creates `chrome_profile` beside `dragoman.exe`, so place the executable in a writable directory. If Chrome is already listening on the selected CDP port with an older profile, close that Chrome instance before logging in again. The separate `session.json` file still uses the existing session location.
+On Windows, `dragoman.exe login` looks for Chrome in the standard installation directories and on `PATH`. It creates `chrome_profile` beside `dragoman.exe`, so place the executable in a writable directory. If Chrome is already listening on the selected CDP port with an older profile, close that Chrome instance before logging in again. Dragoman saves its session under `%USERPROFILE%\.config\dragoman\session.json` when `HOME` is unset. Keep this file private.
 
 Run the packaging script from Windows Command Prompt with Cargo on `PATH` or in the default Rustup location.
 
@@ -101,7 +101,9 @@ Run the packaging script from Windows Command Prompt with Cargo on `PATH` or in 
 .\scripts\package.cmd
 ```
 
-The script stops running instances from `target/release` and `dist/dragoman-windows` before building. It copies the executable, README, and license into `dist/dragoman-windows` without making a ZIP. It leaves any existing browser profiles in both directories intact.
+The script stops running instances from `target/release` and `dist/dragoman-windows` before building. It copies the executable, launch scripts, README, and license into `dist/dragoman-windows` without making a ZIP. It leaves any existing browser profiles in both directories intact.
+
+In the output folder, double-click `login.cmd` for first-time setup. Finish signing in to Gemini in Chrome. If `login.cmd` did not save a session on the first run, leave Chrome open and run it again. After it reports success, close that Chrome window and double-click `start.cmd`. The startup window shows the error if the proxy exits.
 
 ---
 

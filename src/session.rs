@@ -23,11 +23,14 @@ fn default_model() -> String {
 
 impl SessionData {
     pub fn config_path() -> PathBuf {
-        if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(home).join(".config/dragoman/session.json")
-        } else {
-            PathBuf::from("session.json")
-        }
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from);
+        #[cfg(windows)]
+        let home = home.or_else(std::env::home_dir);
+
+        home.map(|dir| dir.join(".config/dragoman/session.json"))
+            .unwrap_or_else(|| PathBuf::from("session.json"))
     }
 
     pub fn load() -> Result<Self, String> {

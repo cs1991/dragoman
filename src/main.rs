@@ -127,10 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .to_string();
 
             if snlm0e.is_empty() {
-                eprintln!(
-                    "\nWarning: Could not read SNlM0e. Please ensure you are logged in to https://gemini.google.com in the browser window."
+                return Err(
+                    "Gemini is not ready. Finish signing in in the Chrome window, then run login again."
+                        .into(),
                 );
-                return Ok(());
             }
 
             // Extract cookies via CDP
@@ -172,7 +172,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             session.save()?;
-            println!("\nSUCCESS: Saved authentication session to ~/.config/dragoman/session.json!");
+            println!(
+                "\nSUCCESS: Saved authentication session to {}",
+                SessionData::config_path().display()
+            );
             println!("You can now close Chrome completely.");
             println!("Run 'dragoman serve' to launch the proxy without any browser running.");
         }

@@ -28,6 +28,8 @@ if not exist "%packageDir%\" (
     mkdir "%packageDir%" || goto :failed
 )
 copy /Y "%DRAGOMAN_RELEASE_EXE%" "%packageDir%\dragoman.exe" >nul || goto :failed
+copy /Y "scripts\windows\login.cmd" "%packageDir%\login.cmd" >nul || goto :failed
+copy /Y "scripts\windows\start.cmd" "%packageDir%\start.cmd" >nul || goto :failed
 copy /Y "README.md" "%packageDir%\README.md" >nul || goto :failed
 copy /Y "LICENSE" "%packageDir%\LICENSE" >nul || goto :failed
 
