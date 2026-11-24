@@ -214,7 +214,9 @@ print(urllib.request.urlopen(request, timeout=600).read().decode())
 PY
 ```
 
-Streaming requests, `input_video` parts and `file` parts use the same upload path. A request carries at most 10 attachments. `--max-attachment-mb` sets the per-attachment size limit and defaults to 200.
+Streaming requests, `input_video` parts and `file` parts use the same upload path. Attachment count per request is not capped, and `--max-attachment-mb` sets the per-attachment size limit with a default of 200. The HTTP body limit is derived from that value, so a larger limit accepts a larger total request.
+
+`max_tokens` is accepted and ignored. Gemini Web decides when a response ends, so the proxy never cuts the answer short. The full message history is sent as prompt text without truncation. The model context window belongs to Gemini itself.
 
 Media parts without a usable source return HTTP 400. This prevents base64 payloads or attachment objects from becoming oversized prompt text.
 

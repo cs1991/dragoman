@@ -26,9 +26,6 @@ pub struct AppState {
     pub max_attachment_bytes: u64,
 }
 
-const MAX_ATTACHMENTS_PER_REQUEST: usize = 10;
-const MAX_PROMPT_BYTES: usize = 8 * 1024 * 1024;
-
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -139,15 +136,6 @@ async fn chat_completions(
 
     let media = req.collect_media();
     info!("Request attachments: {}", media.len());
-    if media.len() > MAX_ATTACHMENTS_PER_REQUEST {
-        return openai_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            format!(
-                "A request can contain at most {MAX_ATTACHMENTS_PER_REQUEST} video, image or file attachments"
-            ),
-        );
-    }
 
     let mut prompt = PromptTranslator::build_gemini_prompt(&req);
     let has_user_text = req
@@ -167,14 +155,6 @@ async fn chat_completions(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "The request contains no text or supported attachment.",
-        );
-    }
-
-    if prompt.len() > MAX_PROMPT_BYTES {
-        return openai_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "The text prompt is too large. Send video, image or file bytes as attachment content parts.",
         );
     }
 
