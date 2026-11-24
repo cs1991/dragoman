@@ -1,6 +1,6 @@
 # Dragoman
 
-> Dragoman: A local OpenAI-compatible bridge written in Rust. Routes requests from coding agents (Cline, Aider, OpenHands, Codex) to Gemini Web (`gemini.google.com`) to query the Gemini 4 Argon model with a Google AI Pro subscription.
+> Dragoman: A local OpenAI-compatible bridge written in Rust. Routes requests from coding agents (Cline, Aider, OpenHands, Codex) to Gemini Web (`gemini.google.com`) to query the Gemini 4 models with a Google AI Pro subscription.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org/)
@@ -9,7 +9,7 @@
 
 ## Core Features
 
-- Direct Gemini 4 Argon access: Routes queries to Gemini 4 Argon (`Argon4p0`) through web sessions.
+- Direct Gemini 4 access: Routes queries to Hydrogen, Auto, or Neon through web sessions. The model is selected per request.
 - Zero browser runtime: Uses native HTTP/2 direct RPC (`StreamGenerate`). Chrome does not run in the background during normal use.
 - Standard OpenAI API compatibility: Implements `/v1/chat/completions`, `/v1/models`, and `/health`.
 - Real-time streaming: Server-Sent Events (SSE) deliver chunked token responses as they generate.
@@ -34,7 +34,7 @@ Dragoman Proxy Server (Rust / Axum on http://127.0.0.1:8080)
   ▼
 Google Gemini Backend (assistant.lamda.BardFrontendService/StreamGenerate)
   │
-  ├── Targets internal model: Argon4p0 (Gemini 4 Argon)
+  ├── Targets Gemini 4 model from the request: Hydrogen (default), Auto, Neon
   │
   ▼
 Real-Time Stream Parser
@@ -76,7 +76,7 @@ Steps performed:
 
 ### 3. Verify Direct RPC Connection
 
-Test communication with Gemini 4 Argon:
+Test communication with the default model:
 
 ```bash
 ./target/release/dragoman test-rpc "State your model identity in one sentence."
@@ -131,10 +131,28 @@ Point your AI coding tool to Dragoman with these settings:
 | Setting | Value |
 | :--- | :--- |
 | **API Base URL** | `http://127.0.0.1:8080/v1` |
-| **Model** | `gemini-4-argon` |
+| **Model** | `gemini-4-hydrogen` (default), `gemini-4-auto`, `gemini-4-neon` |
 | **API Key** | Leave blank. If the client requires a value, use `dragoman-local`. |
 
 Dragoman accepts requests with or without an `Authorization` header and does not check the API key. The proxy still needs the Gemini session saved by `dragoman login`. It listens on all IPv4 interfaces, so keep the port behind your local firewall and do not forward it.
+
+### Model Selection
+
+`/v1/models` lists the models the signed-in accounts can use. Pass one of the ids in the `model` field of `/v1/chat/completions`.
+
+| Model | Upstream id | Behaviour |
+| :--- | :--- | :--- |
+| `gemini-4-hydrogen` | `56fdd199312815e2` | Everyday help, lowest latency. This is the default. |
+| `gemini-4-auto` | `8c46e95b1a07cecc` | Gemini picks the depth per prompt. |
+| `gemini-4-neon` | `e6fa609c3fa255c0` | Deeper analysis. It reasons longer and runs code for arithmetic. |
+
+The legacy names `gemini-4-argon` and `gemini-4-argon-thinking` still resolve. They map to Hydrogen and Neon. An unknown name falls back to Hydrogen.
+
+`gemini-4-carbon` answers 400 with `model_not_available`. The web app shows Carbon behind a Google AI Ultra upgrade, so a Pro session cannot generate with it.
+
+Model choice travels in the `x-goog-ext-525001261-jspb` header. The same number is mirrored into payload slot 79.
+
+When Gemini Web parks a request the stream carries `{"37":[n]}` queue heartbeats and no candidate text. Dragoman stops after three heartbeats and answers 503 with `model_not_available` instead of holding the connection open. Set `DRAGOMAN_PARKED_TICKS` to change the threshold.
 
 ### Example: Non-Streaming Request
 
@@ -142,7 +160,7 @@ Dragoman accepts requests with or without an `Authorization` header and does not
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-4-argon",
+    "model": "gemini-4-hydrogen",
     "messages": [
       {"role": "user", "content": "Explain what a dragoman was in history in 20 words."}
     ],
@@ -156,7 +174,7 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 curl -N http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-4-argon",
+    "model": "gemini-4-neon",
     "messages": [
       {"role": "user", "content": "Write a Rust function that computes Fibonacci numbers."}
     ],
@@ -174,7 +192,7 @@ Local video file:
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-4-argon",
+    "model": "gemini-4-neon",
     "messages": [{
       "role": "user",
       "content": [
@@ -196,7 +214,7 @@ import urllib.request
 
 video = base64.b64encode(pathlib.Path("clip.mp4").read_bytes()).decode("ascii")
 body = {
-    "model": "gemini-4-argon",
+    "model": "gemini-4-neon",
     "messages": [{
         "role": "user",
         "content": [

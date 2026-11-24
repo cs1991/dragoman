@@ -9,6 +9,7 @@ use tracing::info;
 use crate::accounts::{Account, AccountPool, BalanceStrategy, FailureKind};
 use crate::openai::types::MediaAttachment;
 use crate::session::SessionData;
+use crate::web::models::{self, ModelSpec};
 use crate::web::upload::{UploadError, UploadedFile, upload_attachment};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -17,6 +18,12 @@ pub struct StreamChunkPayload {
     pub response_id: Option<String>,
     pub choice_id: Option<String>,
     pub candidate_text: Option<String>,
+    /// Set when the chunk is an upstream queue heartbeat (`{"37":[n]}`).
+    ///
+    /// Gemini Web emits these only while a request is parked before the
+    /// candidate phase. A normal generation never produces them, including
+    /// the long silence while a video is analyzed.
+    pub parked: bool,
 }
 
 pub struct GeminiWebClient {
@@ -71,6 +78,25 @@ fn idle_timeout() -> Duration {
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(120))
 }
+
+/// Heartbeats Gemini Web emits while a request sits in the upstream queue.
+///
+/// A served request never receives one, so a few consecutive heartbeats with
+/// no candidate text identify a parked model. Waiting for the 120 second
+/// stream idle timeout instead makes the caller hang on a request the backend
+/// has already shelved.
+fn parked_tick_limit() -> usize {
+    std::env::var("DRAGOMAN_PARKED_TICKS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|ticks| *ticks > 0)
+        .unwrap_or(3)
+}
+
+/// Marker prefixed to the message of a parked-model failure.
+///
+/// The proxy strips it and answers with a 503 instead of a generic 500.
+pub const MODEL_PARKED_MARKER: &str = "model_parked: ";
 
 fn transport_error(action: &str, error: &reqwest::Error) -> String {
     let detail = if error.is_timeout() {
@@ -142,6 +168,22 @@ impl GeminiWebClient {
         resp_id: Option<&str>,
         files: &[UploadedFile],
     ) -> Vec<serde_json::Value> {
+        Self::build_stream_generate_payload_with_files_and_model(
+            prompt,
+            conv_id,
+            resp_id,
+            files,
+            models::default_model(),
+        )
+    }
+
+    pub fn build_stream_generate_payload_with_files_and_model(
+        prompt: &str,
+        conv_id: Option<&str>,
+        resp_id: Option<&str>,
+        files: &[UploadedFile],
+        model: ModelSpec,
+    ) -> Vec<serde_json::Value> {
         let mut inner: Vec<serde_json::Value> = vec![serde_json::Value::Null; 99];
         let attachments = if files.is_empty() {
             serde_json::Value::Null
@@ -162,7 +204,7 @@ impl GeminiWebClient {
         inner[7] = json!(1);
         inner[10] = json!(1);
         inner[11] = json!(0);
-        inner[17] = json!([[2]]); // Enforce Argon (Argon4p0 / 4 Argon mode)
+        inner[17] = json!([[0]]);
         inner[18] = json!(0);
         inner[27] = json!(1);
         inner[30] = json!([4, 16, 19]);
@@ -175,7 +217,8 @@ impl GeminiWebClient {
         if let Some(cid) = conv_id {
             inner[71] = json!([cid, null, null, null, null, null, null, null]);
         }
-        inner[79] = json!(8);
+        inner[59] = json!(uuid::Uuid::new_v4().to_string().to_uppercase());
+        inner[79] = json!(model.number);
         inner[80] = json!(1);
         inner[91] = json!(1);
         inner[96] = json!(0);
@@ -198,7 +241,25 @@ impl GeminiWebClient {
         resp_id: Option<&str>,
         files: &[UploadedFile],
     ) -> String {
-        let inner = Self::build_stream_generate_payload_with_files(prompt, conv_id, resp_id, files);
+        Self::build_form_envelope_with_files_and_model(
+            prompt,
+            conv_id,
+            resp_id,
+            files,
+            models::default_model(),
+        )
+    }
+
+    pub fn build_form_envelope_with_files_and_model(
+        prompt: &str,
+        conv_id: Option<&str>,
+        resp_id: Option<&str>,
+        files: &[UploadedFile],
+        model: ModelSpec,
+    ) -> String {
+        let inner = Self::build_stream_generate_payload_with_files_and_model(
+            prompt, conv_id, resp_id, files, model,
+        );
         let inner_json = serde_json::to_string(&inner).unwrap_or_default();
         json!([null, inner_json]).to_string()
     }
@@ -218,6 +279,7 @@ impl GeminiWebClient {
         let mut resp_id = None;
         let mut choice_id = None;
         let mut candidate_text = None;
+        let mut parked = false;
 
         let mut entries = Vec::new();
         Self::collect_wrb_fr_entries(&val, &mut entries);
@@ -247,16 +309,27 @@ impl GeminiWebClient {
                         candidate_text = Some(content.to_string());
                     }
                 }
+
+                if let Some(first) = inner_obj.as_array().and_then(|arr| arr.first())
+                    && first.get("37").is_some()
+                {
+                    parked = true;
+                }
             }
         }
 
-        if conv_id.is_some() || resp_id.is_some() || choice_id.is_some() || candidate_text.is_some()
+        if conv_id.is_some()
+            || resp_id.is_some()
+            || choice_id.is_some()
+            || candidate_text.is_some()
+            || parked
         {
             Some(StreamChunkPayload {
                 conversation_id: conv_id,
                 response_id: resp_id,
                 choice_id,
                 candidate_text,
+                parked,
             })
         } else {
             None
@@ -284,10 +357,21 @@ impl GeminiWebClient {
         files: &[UploadedFile],
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
+        self.send_prompt_stream_with_model(prompt, files, models::default_model(), delta_tx)
+            .await
+    }
+
+    pub async fn send_prompt_stream_with_model(
+        &self,
+        prompt: &str,
+        files: &[UploadedFile],
+        model: ModelSpec,
+        delta_tx: mpsc::Sender<Result<String, String>>,
+    ) -> Result<String, String> {
         let lease = self.pool.lease().await;
         let account = lease.account.clone();
         let result = self
-            .run_turn(&account, prompt, files, delta_tx.clone())
+            .run_turn(&account, prompt, files, model, delta_tx.clone())
             .await;
         drop(lease);
 
@@ -311,6 +395,24 @@ impl GeminiWebClient {
         &self,
         prompt: &str,
         media: &[MediaAttachment],
+        max_attachment_bytes: u64,
+        delta_tx: mpsc::Sender<Result<String, String>>,
+    ) -> Result<String, String> {
+        self.send_prompt_stream_with_media_and_model(
+            prompt,
+            media,
+            models::default_model(),
+            max_attachment_bytes,
+            delta_tx,
+        )
+        .await
+    }
+
+    pub async fn send_prompt_stream_with_media_and_model(
+        &self,
+        prompt: &str,
+        media: &[MediaAttachment],
+        model: ModelSpec,
         max_attachment_bytes: u64,
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
@@ -378,7 +480,7 @@ impl GeminiWebClient {
             }
 
             let result = self
-                .run_turn(&account, prompt, &files, delta_tx.clone())
+                .run_turn(&account, prompt, &files, model, delta_tx.clone())
                 .await;
             drop(lease);
 
@@ -396,6 +498,10 @@ impl GeminiWebClient {
                     );
                     account.note_failure(error.kind, &error.message);
                     last_error = error.message;
+                    if error.kind == FailureKind::Model {
+                        let _ = delta_tx.send(Err(last_error.clone())).await;
+                        return Err(last_error);
+                    }
                     if error.streamed {
                         let _ = delta_tx.send(Err(last_error.clone())).await;
                         return Err(last_error);
@@ -413,6 +519,7 @@ impl GeminiWebClient {
         account: &Account,
         prompt: &str,
         files: &[UploadedFile],
+        model: ModelSpec,
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, TurnError> {
         let had_context = {
@@ -421,7 +528,7 @@ impl GeminiWebClient {
         };
 
         let first = self
-            .stream_attempt(account, prompt, files, delta_tx.clone())
+            .stream_attempt(account, prompt, files, model, delta_tx.clone())
             .await;
         if first.error.is_none() && !first.text.trim().is_empty() {
             return Ok(first.text);
@@ -448,7 +555,9 @@ impl GeminiWebClient {
                 "[{}] Retrying once with a fresh conversation after: {}",
                 account.name, first_error
             );
-            let second = self.stream_attempt(account, prompt, files, delta_tx).await;
+            let second = self
+                .stream_attempt(account, prompt, files, model, delta_tx)
+                .await;
             if second.error.is_none() && !second.text.trim().is_empty() {
                 return Ok(second.text);
             }
@@ -495,6 +604,7 @@ impl GeminiWebClient {
         account: &Account,
         prompt: &str,
         files: &[UploadedFile],
+        model: ModelSpec,
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> StreamAttempt {
         let (snlm0e, f_sid, bl, cookie, conv_id, resp_id, base_url) = {
@@ -526,11 +636,12 @@ impl GeminiWebClient {
             req_id
         );
 
-        let f_req = Self::build_form_envelope_with_files(
+        let f_req = Self::build_form_envelope_with_files_and_model(
             prompt,
             conv_id.as_deref(),
             resp_id.as_deref(),
             files,
+            model,
         );
 
         let mut headers = HeaderMap::new();
@@ -555,6 +666,20 @@ impl GeminiWebClient {
             cookie_val.set_sensitive(true);
             headers.insert(COOKIE, cookie_val);
         }
+        let model_session = uuid::Uuid::new_v4().to_string().to_uppercase();
+        if let Ok(value) = HeaderValue::from_str(&models::model_header(
+            model,
+            models::capacity(),
+            false,
+            &model_session,
+        )) {
+            headers.insert("x-goog-ext-525001261-jspb", value);
+        }
+        headers.insert("x-goog-ext-73010989-jspb", HeaderValue::from_static("[0]"));
+        headers.insert(
+            "x-goog-ext-73010990-jspb",
+            HeaderValue::from_static("[0,0,0]"),
+        );
         if !files.is_empty() {
             let jspb = format!(
                 "[\"{}\",1]",
@@ -566,8 +691,8 @@ impl GeminiWebClient {
         }
 
         info!(
-            "[{}] Sending native direct RPC to Gemini Web (StreamGenerate, Argon4p0)...",
-            account.name
+            "[{}] Sending native direct RPC to Gemini Web (StreamGenerate, {})...",
+            account.name, model.label
         );
 
         let response = match self
@@ -606,6 +731,7 @@ impl GeminiWebClient {
         let mut line_buffer = String::new();
         let mut first_chunk = true;
         let mut chunks = 0usize;
+        let mut parked_ticks = 0usize;
         let idle = idle_timeout();
 
         let mut new_conv_id: Option<String> = None;
@@ -678,9 +804,24 @@ impl GeminiWebClient {
                     &mut new_conv_id,
                     &mut new_resp_id,
                     &mut new_choice_id,
+                    &mut parked_ticks,
                     &delta_tx,
                 )
                 .await;
+            }
+
+            if parked_ticks >= parked_tick_limit() && full_text.trim().is_empty() {
+                let err_msg = format!(
+                    "{}Gemini Web parked the request for model {} after {} queue heartbeats and never started generating. The signed-in accounts are not being served this model right now.",
+                    MODEL_PARKED_MARKER, model.label, parked_ticks
+                );
+                info!("[{}] {}", account.name, err_msg);
+                return StreamAttempt {
+                    text: full_text,
+                    error: Some(err_msg),
+                    kind: Some(FailureKind::Model),
+                    chunks,
+                };
             }
         }
 
@@ -692,6 +833,7 @@ impl GeminiWebClient {
                 &mut new_conv_id,
                 &mut new_resp_id,
                 &mut new_choice_id,
+                &mut parked_ticks,
                 &delta_tx,
             )
             .await;
@@ -746,9 +888,13 @@ impl GeminiWebClient {
         new_conv_id: &mut Option<String>,
         new_resp_id: &mut Option<String>,
         new_choice_id: &mut Option<String>,
+        parked_ticks: &mut usize,
         delta_tx: &mpsc::Sender<Result<String, String>>,
     ) {
         if let Some(parsed) = Self::parse_wrb_fr_line(line) {
+            if parsed.parked && parsed.candidate_text.is_none() {
+                *parked_ticks += 1;
+            }
             if let Some(cid) = parsed.conversation_id {
                 *new_conv_id = Some(cid);
             }
@@ -787,6 +933,23 @@ impl GeminiWebClient {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn queue_heartbeat_is_reported_as_parked() {
+        let line = r#"[["wrb.fr",null,"[{\"37\":[2]}]"]]"#;
+        let parsed = super::GeminiWebClient::parse_wrb_fr_line(line).expect("parked frame");
+        assert!(parsed.parked);
+        assert!(parsed.candidate_text.is_none());
+        assert!(parsed.conversation_id.is_none());
+    }
+
+    #[test]
+    fn candidate_frame_is_not_parked() {
+        let line = r#"[["wrb.fr",null,"[null,[\"c_1\",\"r_1\"],null,null,[[\"rc_1\",[\"PING\"]]]]"]]"#;
+        let parsed = super::GeminiWebClient::parse_wrb_fr_line(line).expect("candidate frame");
+        assert!(!parsed.parked);
+        assert_eq!(parsed.candidate_text.as_deref(), Some("PING"));
+    }
+
     #[tokio::test]
     async fn transport_errors_do_not_expose_request_urls() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

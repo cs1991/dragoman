@@ -14,8 +14,12 @@ fn test_stream_generate_payload_slot_defaults() {
     assert_eq!(payload[1], json!(["en"]));
     // Slot 3 (response_id) must be Null on initial turn
     assert!(payload[3].is_null());
-    // Slot 17 must enforce Argon
-    assert_eq!(payload[17], json!([[2]]));
+    // Slot 17 is the neutral mode marker, model selection rides in the header
+    assert_eq!(payload[17], json!([[0]]));
+    // Slot 59 carries the per-request session id used by the model header
+    assert!(payload[59].as_str().is_some_and(|value| value.len() == 36));
+    // Slot 79 mirrors the default model number (4 Hydrogen)
+    assert_eq!(payload[79], json!(1));
     // Slot 71 (conversation_id) must be Null on initial turn
     assert!(payload[71].is_null());
 }

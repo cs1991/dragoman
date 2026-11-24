@@ -29,7 +29,7 @@ enum Commands {
         port: u16,
 
         /// Target model identifier reported to coding agents
-        #[arg(short, long, default_value = "gemini-4-argon")]
+        #[arg(short, long, default_value = "gemini-4-hydrogen")]
         model: String,
 
         /// Maximum attachment size in MiB for video, image and file parts
@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command.unwrap_or(Commands::Serve {
         port: 8080,
-        model: "gemini-4-argon".to_string(),
+        model: "gemini-4-hydrogen".to_string(),
         max_attachment_mb: 200,
         balance: "round-robin".to_string(),
         desktop: false,

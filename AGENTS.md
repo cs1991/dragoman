@@ -6,7 +6,7 @@ This document defines conventions, architecture rules, and git workflows for AI 
 
 ## 1. Project Overview and Core Constraints
 
-Dragoman is an OpenAI-compatible proxy server for Gemini Web. It routes requests directly to the Gemini 4 Argon model (`Argon4p0`) with a Google AI Pro subscription.
+Dragoman is an OpenAI-compatible proxy server for Gemini Web. It routes requests directly to the Gemini 4 models (Hydrogen, Auto, Neon) with a Google AI Pro subscription. The request `model` field selects the upstream model through the `x-goog-ext-525001261-jspb` header, and `src/web/models.rs` holds the model table.
 
 Non-negotiable architectural rules:
 - Zero browser in production runtime: `dragoman serve` communicates strictly over native HTTP/2 with OpenSSL (`assistant.lamda.BardFrontendService/StreamGenerate`). The browser runs only once during `dragoman login` to capture session tokens.

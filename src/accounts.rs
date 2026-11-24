@@ -12,6 +12,7 @@ pub enum FailureKind {
     Auth,
     Transient,
     Context,
+    Model,
 }
 
 impl FailureKind {
@@ -21,6 +22,7 @@ impl FailureKind {
             Self::Auth => Duration::from_secs(1800),
             Self::Transient => Duration::from_secs(30),
             Self::Context => Duration::from_secs(60),
+            Self::Model => Duration::from_secs(120),
         }
     }
 
@@ -30,6 +32,7 @@ impl FailureKind {
             Self::Auth => "auth",
             Self::Transient => "transient",
             Self::Context => "context",
+            Self::Model => "model",
         }
     }
 }

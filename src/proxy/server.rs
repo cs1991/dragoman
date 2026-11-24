@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::openai::types::*;
 use crate::proxy::translator::PromptTranslator;
 use crate::web::GeminiWebClient;
+use crate::web::models;
 
 pub struct AppState {
     pub web_client: Arc<GeminiWebClient>,
@@ -72,30 +73,27 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .unwrap_or_default()
         .as_secs();
 
-    let models = vec![
-        ModelObject {
+    let mut data: Vec<ModelObject> = models::ADVERTISED
+        .iter()
+        .map(|model| ModelObject {
+            id: model.name.to_string(),
+            object: "model".to_string(),
+            created: now,
+            owned_by: "google".to_string(),
+        })
+        .collect();
+    if !data.iter().any(|model| model.id == state.default_model) {
+        data.push(ModelObject {
             id: state.default_model.clone(),
             object: "model".to_string(),
             created: now,
             owned_by: "google".to_string(),
-        },
-        ModelObject {
-            id: "gemini-4-argon".to_string(),
-            object: "model".to_string(),
-            created: now,
-            owned_by: "google".to_string(),
-        },
-        ModelObject {
-            id: "gemini-4-argon-thinking".to_string(),
-            object: "model".to_string(),
-            created: now,
-            owned_by: "google".to_string(),
-        },
-    ];
+        });
+    }
 
     Json(ModelListResponse {
         object: "list".to_string(),
-        data: models,
+        data,
     })
 }
 
@@ -166,6 +164,14 @@ async fn chat_completions(
 
     let is_stream = req.stream.unwrap_or(false);
     let request_model = req.model.clone();
+    let model = models::resolve(&req.model);
+    if !model.available {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "model_not_available",
+            "Carbon requires a Google AI Ultra subscription.",
+        );
+    }
 
     let (delta_tx, mut delta_rx) = mpsc::channel::<Result<String, String>>(100);
 
@@ -183,9 +189,10 @@ async fn chat_completions(
         let max_attachment_bytes = state.max_attachment_bytes;
         tokio::spawn(async move {
             if let Err(e) = client
-                .send_prompt_stream_with_media(
+                .send_prompt_stream_with_media_and_model(
                     &prompt_clone,
                     &media_clone,
+                    model,
                     max_attachment_bytes,
                     delta_tx,
                 )
@@ -250,11 +257,12 @@ async fn chat_completions(
             }
 
             if let Some(err) = stream_error {
+                let (message, code, kind) = classify_generation_error(err);
                 let err_payload = serde_json::json!({
                     "error": {
-                        "message": err,
-                        "type": "upstream_error",
-                        "code": 500
+                        "message": message,
+                        "type": kind,
+                        "code": code
                     }
                 });
                 yield Ok::<Event, Infallible>(Event::default().event("error").data(err_payload.to_string()));
@@ -312,7 +320,13 @@ async fn chat_completions(
         let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
         match state
             .web_client
-            .send_prompt_stream_with_media(&prompt, &media, state.max_attachment_bytes, delta_tx)
+            .send_prompt_stream_with_media_and_model(
+                &prompt,
+                &media,
+                model,
+                state.max_attachment_bytes,
+                delta_tx,
+            )
             .await
         {
             Ok(full_output) => {
@@ -355,14 +369,31 @@ async fn chat_completions(
             Err(e) => {
                 drain.abort();
                 error!("Generation failed: {}", e);
+                let (message, code, kind) = classify_generation_error(e);
                 openai_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "upstream_error",
-                    format!("Generation failed: {}", e),
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                    kind,
+                    message,
                 )
             }
         }
     }
+}
+
+/// Map a generation failure onto an HTTP status, error type, and message.
+///
+/// A parked model is an upstream availability problem the caller can act on
+/// by retrying later or switching models, so it answers 503 instead of the
+/// generic 500 used for unexpected failures.
+fn classify_generation_error(error: String) -> (String, u16, &'static str) {
+    if let Some(detail) = error.strip_prefix(crate::web::client::MODEL_PARKED_MARKER) {
+        return (detail.to_string(), 503, "model_not_available");
+    }
+    (
+        format!("Generation failed: {}", error),
+        500,
+        "upstream_error",
+    )
 }
 
 fn openai_error(status: StatusCode, error_type: &str, message: impl Into<String>) -> Response {
