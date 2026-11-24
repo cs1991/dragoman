@@ -226,6 +226,13 @@ dragoman serve --balance round-robin
 
 `login` writes `sessions/<name>.json` and prints the full path. Account names accept letters, digits, dash, underscore and dot.
 
+Chrome keeps one signed-in Google account per profile. Give every account its own profile directory and CDP port.
+
+```bash
+dragoman login --account work --profile-dir D:/chrome-profiles/work --cdp-port 9223
+dragoman login --account backup --profile-dir D:/chrome-profiles/backup --cdp-port 9224
+```
+
 `serve` leases one account per turn. Media is uploaded with that account's cookie, then the prompt is sent on the same account. A failed turn parks the account for its cooldown and the next account retries with a fresh upload. Cooldowns are 300 seconds for quota errors, 1800 seconds for auth errors, 30 seconds for transport errors and 60 seconds for a stalled turn.
 
 `--balance round-robin` rotates accounts in file order. `--balance least-used` picks the account with the fewest completed turns. An account that is already serving a turn is skipped when another account is free, so two clients can run in parallel on different accounts.
@@ -270,7 +277,7 @@ Options:
 
 `serve --balance least-used` switches from round-robin to least-used selection.
 
-`login --account NAME` selects the session file name, default `main`.
+`login --account NAME` selects the session file name, default `main`. `login --profile-dir DIR --cdp-port PORT` isolates the Chrome profile for each Google account.
 
 `start.cmd` stops a previous Dragoman process using the same executable and port before it starts.
 

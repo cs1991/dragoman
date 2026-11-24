@@ -48,6 +48,10 @@ enum Commands {
         /// Account name used for the saved session file
         #[arg(long, default_value = "main")]
         account: String,
+
+        /// Chrome profile directory used for this login
+        #[arg(long)]
+        profile_dir: Option<std::path::PathBuf>,
     },
     /// List configured accounts and their rotation state
     Accounts,
@@ -133,7 +137,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             axum::serve(listener, router).await?;
         }
-        Commands::Login { cdp_port, account } => {
+        Commands::Login {
+            cdp_port,
+            account,
+            profile_dir,
+        } => {
             let session_path = match session_path_for_account(&account) {
                 Ok(path) => path,
                 Err(error) => {
@@ -149,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cdp_port
             );
 
-            BrowserLauncher::ensure_chrome_running(cdp_port, None)
+            BrowserLauncher::ensure_chrome_running(cdp_port, profile_dir)
                 .await
                 .map_err(|e| format!("Failed to launch browser: {}", e))?;
 
