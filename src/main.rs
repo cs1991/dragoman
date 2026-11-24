@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use dragoman::accounts::{AccountPool, BalanceStrategy, session_path_for_account};
 use dragoman::browser::{BrowserLauncher, CdpClient};
+use dragoman::desktop_accounts::AccountStore;
 use dragoman::proxy::server::{AppState, create_router};
 use dragoman::session::SessionData;
 use dragoman::web::GeminiWebClient;
@@ -38,6 +39,9 @@ enum Commands {
         /// Account rotation strategy
         #[arg(long, default_value = "round-robin", value_parser = ["round-robin", "least-used"])]
         balance: String,
+
+        #[arg(long, hide = true)]
+        desktop: bool,
     },
     /// Perform one-time browser login to extract and save session credentials
     Login {
@@ -52,13 +56,40 @@ enum Commands {
         /// Chrome profile directory used for this login
         #[arg(long)]
         profile_dir: Option<std::path::PathBuf>,
+
+        #[arg(long, hide = true)]
+        desktop_id: Option<String>,
     },
     /// List configured accounts and their rotation state
     Accounts,
+    #[command(hide = true)]
+    DesktopAccounts {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
     /// Test direct native HTTP RPC without browser
     TestRpc {
         #[arg(default_value = "Say hello and confirm you are Gemini 4 Argon in 1 sentence.")]
         prompt: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AccountAction {
+    List,
+    Enable {
+        #[arg(long)]
+        id: String,
+    },
+    Disable {
+        #[arg(long)]
+        id: String,
+    },
+    Remove {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        disabled: bool,
     },
 }
 
@@ -77,12 +108,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model: "gemini-4-argon".to_string(),
         max_attachment_mb: 200,
         balance: "round-robin".to_string(),
+        desktop: false,
     }) {
         Commands::Serve {
             port,
             model,
             max_attachment_mb,
             balance,
+            desktop,
         } => {
             let strategy = BalanceStrategy::parse(&balance).unwrap_or(BalanceStrategy::RoundRobin);
             println!("=======================================================");
@@ -121,8 +154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
 
             let router = create_router(app_state);
-            let addr = SocketAddr::from(([0, 0, 0, 0], port));
-            info!("Dragoman listening on http://{}", addr);
+            let ip = if desktop {
+                [127, 0, 0, 1]
+            } else {
+                [0, 0, 0, 0]
+            };
+            let addr = SocketAddr::from((ip, port));
 
             let listener = match tokio::net::TcpListener::bind(addr).await {
                 Ok(listener) => listener,
@@ -135,13 +172,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Err(error) => return Err(error.into()),
             };
-            axum::serve(listener, router).await?;
+            info!("Dragoman listening on http://{}", listener.local_addr()?);
+            if desktop {
+                println!("DESKTOP_READY");
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(async {
+                        let _ = tokio::task::spawn_blocking(|| {
+                            std::io::copy(&mut std::io::stdin(), &mut std::io::sink())
+                        })
+                        .await;
+                    })
+                    .await?;
+            } else {
+                axum::serve(listener, router).await?;
+            }
         }
         Commands::Login {
             cdp_port,
             account,
             profile_dir,
+            desktop_id,
         } => {
+            if let Some(id) = desktop_id {
+                let store = AccountStore::new(SessionData::config_dir());
+                let path = store.login_path(&id)?;
+                let profile = AccountStore::profile_dir(&id, &std::env::current_exe()?)?;
+
+                // A profile that already holds a Google session can be read
+                // immediately. Otherwise sign in with a plain Chrome window,
+                // because Google rejects sign-in while DevTools is enabled.
+                let mut session = None;
+                let had_session = BrowserLauncher::profile_has_google_session(&profile);
+                if had_session {
+                    println!("Found an existing Google session, reading it...");
+                    let (port, chrome) = BrowserLauncher::start_desktop_login(profile.clone())
+                        .await
+                        .map_err(|_| "Chrome 启动失败。请确认已安装 Chrome，并关闭该账号之前打开的 Chrome 窗口。")?;
+                    session = capture_with_timeout(port, path.clone(), 30).await;
+                    if session.is_none() {
+                        BrowserLauncher::close_login_browser(chrome).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+
+                let session = match session {
+                    Some(session) => session,
+                    None => {
+                        println!("Open Chrome, sign in to Google and open Gemini...");
+                        let mut chrome = BrowserLauncher::spawn_plain_login(profile.clone())
+                            .map_err(|_| "Chrome 启动失败。请确认已安装 Chrome，并关闭该账号之前打开的 Chrome 窗口。")?;
+                        let wait_seconds = if had_session { 180 } else { 240 };
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_secs(wait_seconds);
+                        loop {
+                            let exited = chrome.try_wait().ok().flatten().is_some();
+                            if exited {
+                                break;
+                            }
+                            if !had_session && BrowserLauncher::profile_has_google_session(&profile)
+                            {
+                                break;
+                            }
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        BrowserLauncher::close_login_browser(chrome).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                        let (port, chrome) = BrowserLauncher::start_desktop_login(profile)
+                            .await
+                            .map_err(|_| "Chrome 启动失败。请确认已安装 Chrome，并关闭该账号之前打开的 Chrome 窗口。")?;
+                        let session = capture_with_timeout(port, path.clone(), 60).await;
+                        match session {
+                            Some(session) => session,
+                            None => {
+                                BrowserLauncher::close_login_browser(chrome).await;
+                                return Err(
+                                    "读取会话失败。请重新登录，并在 Gemini 页面加载完成后重试。"
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+                };
+                session
+                    .save()
+                    .map_err(|_| "保存会话失败。请检查配置目录权限。")?;
+                return Ok(());
+            }
             let session_path = match session_path_for_account(&account) {
                 Ok(path) => path,
                 Err(error) => {
@@ -161,76 +282,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .map_err(|e| format!("Failed to launch browser: {}", e))?;
 
-            println!("Connecting to Chrome DevTools to extract session tokens...");
-            let client = CdpClient::connect_to_gemini(cdp_port).await?;
-
-            println!("Extracting session tokens (SNlM0e, FdrFJe, cfb2h) and cookies...");
-            let snlm0e = client
-                .evaluate_js("window.WIZ_global_data?.SNlM0e || ''")
-                .await?
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let f_sid = client
-                .evaluate_js("window.WIZ_global_data?.FdrFJe || ''")
-                .await?
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-            let bl = client
-                .evaluate_js("window.WIZ_global_data?.cfb2h || ''")
-                .await?
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-
-            if snlm0e.is_empty() {
-                return Err(
-                    "Gemini is not ready. Finish signing in in the Chrome window, then run login again."
-                        .into(),
-                );
-            }
-
-            // Extract cookies via CDP
-            let cookies_val = client
-                .call_cdp(
-                    "Network.getCookies",
-                    serde_json::json!({
-                        "urls": ["https://gemini.google.com"]
-                    }),
-                )
-                .await?;
-
-            let mut cookie_header = String::new();
-            if let Some(cookies) = cookies_val
-                .get("result")
-                .and_then(|r| r.get("cookies"))
-                .and_then(|c| c.as_array())
-            {
-                let parts: Vec<String> = cookies
-                    .iter()
-                    .filter_map(|c| {
-                        let name = c.get("name")?.as_str()?;
-                        let value = c.get("value")?.as_str()?;
-                        Some(format!("{}={}", name, value))
-                    })
-                    .collect();
-                cookie_header = parts.join("; ");
-            }
-
-            let session = SessionData {
-                snlm0e,
-                f_sid,
-                bl,
-                cookie: cookie_header,
-                model: "Argon4p0".to_string(),
-                conversation_id: None,
-                response_id: None,
-                choice_id: None,
-                base_url: None,
-                path: Some(session_path.clone()),
-            };
-
+            let session = capture_session(cdp_port, session_path.clone(), false).await?;
             session.save()?;
             println!(
                 "\nSUCCESS: Saved authentication session to {}",
@@ -238,6 +290,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("You can now close Chrome completely.");
             println!("Run 'dragoman serve' to launch the proxy without any browser running.");
+        }
+        Commands::DesktopAccounts { action } => {
+            let store = AccountStore::new(SessionData::config_dir());
+            match action {
+                AccountAction::List => println!("{}", serde_json::to_string(&store.list()?)?),
+                AccountAction::Enable { id } => store.set_enabled(&id, true)?,
+                AccountAction::Disable { id } => store.set_enabled(&id, false)?,
+                AccountAction::Remove { id, disabled } => store.remove(&id, !disabled)?,
+            }
         }
         Commands::Accounts => {
             let pool = match AccountPool::load(BalanceStrategy::RoundRobin) {
@@ -303,4 +364,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+async fn capture_with_timeout(
+    cdp_port: u16,
+    session_path: std::path::PathBuf,
+    seconds: u64,
+) -> Option<SessionData> {
+    tokio::time::timeout(std::time::Duration::from_secs(seconds), async {
+        loop {
+            if let Ok(session) = capture_session(cdp_port, session_path.clone(), true).await {
+                return session;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    })
+    .await
+    .ok()
+}
+
+async fn capture_session(
+    cdp_port: u16,
+    session_path: std::path::PathBuf,
+    desktop: bool,
+) -> Result<SessionData, Box<dyn std::error::Error>> {
+    let client = CdpClient::connect_to_gemini_tab(cdp_port, !desktop).await?;
+
+    let snlm0e = client
+        .evaluate_js("window.WIZ_global_data?.SNlM0e || ''")
+        .await?
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let f_sid = client
+        .evaluate_js("window.WIZ_global_data?.FdrFJe || ''")
+        .await?
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let bl = client
+        .evaluate_js("window.WIZ_global_data?.cfb2h || ''")
+        .await?
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    if snlm0e.is_empty() {
+        return Err(
+            "Gemini is not ready. Finish signing in in the Chrome window, then run login again."
+                .into(),
+        );
+    }
+
+    // Extract cookies via CDP
+    let cookies_val = client
+        .call_cdp(
+            "Network.getCookies",
+            serde_json::json!({
+                "urls": ["https://gemini.google.com"]
+            }),
+        )
+        .await?;
+
+    let mut cookie_header = String::new();
+    let mut has_auth_cookie = false;
+    if let Some(cookies) = cookies_val
+        .get("result")
+        .and_then(|r| r.get("cookies"))
+        .and_then(|c| c.as_array())
+    {
+        has_auth_cookie = cookies.iter().any(|cookie| {
+            cookie
+                .get("name")
+                .and_then(|name| name.as_str())
+                .is_some_and(|name| matches!(name, "__Secure-1PSID" | "__Secure-3PSID" | "SID"))
+        });
+        let parts: Vec<String> = cookies
+            .iter()
+            .filter_map(|c| {
+                let name = c.get("name")?.as_str()?;
+                let value = c.get("value")?.as_str()?;
+                Some(format!("{}={}", name, value))
+            })
+            .collect();
+        cookie_header = parts.join("; ");
+    }
+
+    if desktop && (!has_auth_cookie || f_sid.is_empty() || bl.is_empty()) {
+        return Err("Finish signing in to Gemini first.".into());
+    }
+    Ok(SessionData {
+        snlm0e,
+        f_sid,
+        bl,
+        cookie: cookie_header,
+        model: "Argon4p0".to_string(),
+        conversation_id: None,
+        response_id: None,
+        choice_id: None,
+        base_url: None,
+        path: Some(session_path),
+    })
 }

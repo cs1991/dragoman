@@ -92,7 +92,21 @@ Launch the proxy server:
 
 Connect from the same machine at `http://127.0.0.1:8080`.
 
-### Windows login and packaging
+### Windows desktop app
+
+Build the Windows package with Cargo and the Windows .NET Framework compiler.
+
+```cmd
+scripts\package.cmd
+```
+
+Open `dist\dragoman-windows\DragomanGui.exe`. Keep `dragoman.exe` beside it in a writable directory. Add an account by entering a local alias. Chrome opens a normal window with no DevTools endpoint, because Google rejects sign-in while remote debugging is enabled. Sign in to Google and open Gemini. Dragoman watches for the Google session cookies, restarts that profile with DevTools for a few seconds, reads the session and saves it. Each desktop account has its own Chrome profile under `desktop-profiles` beside the executables. For example, `work` uses `desktop-profiles\account-work.profile`. Keep the profile directories private. The Chrome window that remains open is already signed in. The desktop list also shows existing CLI and legacy sessions.
+
+Use the account table to sign in again, enable, disable, or delete a saved proxy session. Deletion retains the Chrome profile. Stop the proxy before changing accounts. If you also run `dragoman serve` separately, stop that instance before changing its sessions.
+
+Use **启动** to start the local proxy and **复制 API 地址** to copy its base URL. The desktop proxy listens on `127.0.0.1` only. Closing the app stops the proxy it started. The existing CLI remains available for headless use.
+
+### Windows CLI login and packaging
 
 On Windows, `dragoman.exe login` looks for Chrome in the standard installation directories and on `PATH`. It creates `chrome_profile` beside `dragoman.exe`, so place the executable in a writable directory. If Chrome is already listening on the selected CDP port with an older profile, close that Chrome instance before logging in again. Dragoman saves its session under `%USERPROFILE%\.config\dragoman\session.json` when `HOME` is unset. Keep this file private.
 
@@ -102,7 +116,7 @@ Run the packaging script from Windows Command Prompt with Cargo on `PATH` or in 
 .\scripts\package.cmd
 ```
 
-The script stops running instances from `target/release` and `dist/dragoman-windows` before building. It copies the executable, launch scripts, README, and license into `dist/dragoman-windows` without making a ZIP. It leaves any existing browser profiles in both directories intact.
+The script stops running CLI instances from `target/release` and `dist/dragoman-windows` before building. It copies both executables, launch scripts, README, and license into `dist/dragoman-windows` without making a ZIP. It leaves any existing browser profiles in both directories intact.
 
 In the output folder, double-click `login.cmd` for first-time setup. Finish signing in to Gemini in Chrome. If `login.cmd` did not save a session on the first run, leave Chrome open and run it again. After it reports success, close that Chrome window and double-click `start.cmd`. The startup window shows the error if the proxy exits.
 

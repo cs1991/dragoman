@@ -4,6 +4,7 @@ target/
 
 # Dragoman session & credentials
 chrome_profile/
+desktop-profiles/
 session.json
 *.session.json
 *.cookie

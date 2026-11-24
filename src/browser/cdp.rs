@@ -37,6 +37,10 @@ pub struct CdpClient {
 
 impl CdpClient {
     pub async fn connect_to_gemini(cdp_port: u16) -> Result<Self, String> {
+        Self::connect_to_gemini_tab(cdp_port, true).await
+    }
+
+    pub async fn connect_to_gemini_tab(cdp_port: u16, open_tab: bool) -> Result<Self, String> {
         let http_client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -53,12 +57,16 @@ impl CdpClient {
             }
         };
 
-        let gemini_target = targets
-            .into_iter()
-            .find(|t| t.url.contains("gemini.google.com"));
+        let gemini_target = targets.into_iter().find(|t| {
+            t.r#type == "page"
+                && reqwest::Url::parse(&t.url).is_ok_and(|url| {
+                    url.scheme() == "https" && url.host_str() == Some("gemini.google.com")
+                })
+        });
 
         let target = match gemini_target {
             Some(t) => t,
+            None if !open_tab => return Err("Open Gemini in Chrome after signing in".into()),
             None => {
                 info!(
                     "No active Gemini tab found. Creating new tab for https://gemini.google.com/app..."
