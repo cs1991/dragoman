@@ -197,70 +197,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let store = AccountStore::new(SessionData::config_dir());
                 let path = store.login_path(&id)?;
                 let profile = AccountStore::profile_dir(&id, &std::env::current_exe()?)?;
+                let launch_error =
+                    "Chrome 启动失败。请确认已安装 Chrome，并关闭该账号之前打开的 Chrome 窗口。";
 
-                // A profile that already holds a Google session can be read
-                // immediately. Otherwise sign in with a plain Chrome window,
-                // because Google rejects sign-in while DevTools is enabled.
-                let mut session = None;
+                // Google rejects sign-in while DevTools is enabled. An
+                // interactive sign-in runs in a plain Chrome window first, then
+                // a short DevTools session reads the stored cookies.
                 let had_session = BrowserLauncher::profile_has_google_session(&profile);
+                let mut session: Option<SessionData> = None;
+                let mut capture_chrome = None;
+
                 if had_session {
                     println!("Found an existing Google session, reading it...");
                     let (port, chrome) = BrowserLauncher::start_desktop_login(profile.clone())
                         .await
-                        .map_err(|_| "Chrome 启动失败。请确认已安装 Chrome，并关闭该账号之前打开的 Chrome 窗口。")?;
+                        .map_err(|_| launch_error)?;
                     session = capture_with_timeout(port, path.clone(), 30).await;
-                    if session.is_none() {
+                    if session.is_some() {
+                        capture_chrome = Some(chrome);
+                    } else {
                         BrowserLauncher::close_login_browser(chrome).await;
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                 }
 
-                let session = match session {
-                    Some(session) => session,
-                    None => {
-                        println!("Open Chrome, sign in to Google and open Gemini...");
-                        let mut chrome = BrowserLauncher::spawn_plain_login(profile.clone())
-                            .map_err(|_| "Chrome 启动失败。请确认已安装 Chrome，并关闭该账号之前打开的 Chrome 窗口。")?;
-                        let wait_seconds = if had_session { 180 } else { 240 };
-                        let deadline = std::time::Instant::now()
-                            + std::time::Duration::from_secs(wait_seconds);
-                        loop {
-                            let exited = chrome.try_wait().ok().flatten().is_some();
-                            if exited {
-                                break;
-                            }
-                            if !had_session && BrowserLauncher::profile_has_google_session(&profile)
-                            {
-                                break;
-                            }
-                            if std::time::Instant::now() >= deadline {
-                                break;
-                            }
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if session.is_none() {
+                    println!("Open Chrome, sign in to Google and open Gemini...");
+                    let mut chrome = BrowserLauncher::spawn_plain_login(profile.clone())
+                        .map_err(|_| launch_error)?;
+                    let wait_seconds = if had_session { 180 } else { 240 };
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(wait_seconds);
+                    loop {
+                        if chrome.try_wait().ok().flatten().is_some() {
+                            break;
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        BrowserLauncher::close_login_browser(chrome).await;
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-                        let (port, chrome) = BrowserLauncher::start_desktop_login(profile)
-                            .await
-                            .map_err(|_| "Chrome 启动失败。请确认已安装 Chrome，并关闭该账号之前打开的 Chrome 窗口。")?;
-                        let session = capture_with_timeout(port, path.clone(), 60).await;
-                        match session {
-                            Some(session) => session,
-                            None => {
-                                BrowserLauncher::close_login_browser(chrome).await;
-                                return Err(
-                                    "读取会话失败。请重新登录，并在 Gemini 页面加载完成后重试。"
-                                        .into(),
-                                );
-                            }
+                        if !had_session && BrowserLauncher::profile_has_google_session(&profile) {
+                            break;
                         }
+                        if std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    BrowserLauncher::close_login_browser(chrome).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                    let (port, chrome) = BrowserLauncher::start_desktop_login(profile)
+                        .await
+                        .map_err(|_| launch_error)?;
+                    session = capture_with_timeout(port, path.clone(), 60).await;
+                    capture_chrome = Some(chrome);
+                }
+
+                let Some(session) = session else {
+                    if let Some(chrome) = capture_chrome {
+                        BrowserLauncher::close_login_browser(chrome).await;
+                    }
+                    return Err("读取会话失败。请重新登录，并在 Gemini 页面加载完成后重试。".into());
                 };
+
                 session
                     .save()
                     .map_err(|_| "保存会话失败。请检查配置目录权限。")?;
+                if let Some(chrome) = capture_chrome {
+                    BrowserLauncher::close_login_browser(chrome).await;
+                }
                 return Ok(());
             }
             let session_path = match session_path_for_account(&account) {

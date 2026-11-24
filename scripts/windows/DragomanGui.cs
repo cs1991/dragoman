@@ -189,10 +189,12 @@ internal sealed class DragomanGui : Form
     {
         var output = child.StandardOutput.ReadToEndAsync();
         var error = child.StandardError.ReadToEndAsync();
-        await Task.WhenAll(output, error);
         await Task.Run(() => child.WaitForExit());
+        // Chrome inherits the redirected pipe handles and keeps them open after
+        // dragoman.exe exits, so waiting for stream end would hang the dialog.
+        await Task.WhenAny(Task.WhenAll(output, error), Task.Delay(1500));
         if (child.ExitCode != 0) throw new InvalidOperationException(failure);
-        return output.Result;
+        return output.Status == TaskStatus.RanToCompletion ? output.Result : string.Empty;
     }
 
     private async Task<string> Manage(string arguments)
