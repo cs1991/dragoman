@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tracing::info;
 
+use crate::accounts::{Account, AccountPool, BalanceStrategy, FailureKind};
 use crate::openai::types::MediaAttachment;
 use crate::session::SessionData;
 use crate::web::upload::{UploadError, UploadedFile, upload_attachment};
@@ -19,22 +20,45 @@ pub struct StreamChunkPayload {
 }
 
 pub struct GeminiWebClient {
-    session: Arc<Mutex<SessionData>>,
+    pool: Arc<AccountPool>,
     http: reqwest::Client,
 }
 
 struct StreamAttempt {
     text: String,
     error: Option<String>,
+    kind: Option<FailureKind>,
     chunks: usize,
 }
 
 impl StreamAttempt {
-    fn failed(error: String) -> Self {
+    fn failed(error: String, kind: FailureKind) -> Self {
         Self {
             text: String::new(),
             error: Some(error),
+            kind: Some(kind),
             chunks: 0,
+        }
+    }
+}
+
+struct TurnError {
+    message: String,
+    kind: FailureKind,
+    streamed: bool,
+}
+
+fn upload_failure_kind(error: &UploadError) -> Option<FailureKind> {
+    match error {
+        UploadError::Invalid(_) | UploadError::TooLarge(_) => None,
+        UploadError::Upstream(message) => {
+            if message.contains("HTTP 401") || message.contains("HTTP 403") {
+                Some(FailureKind::Auth)
+            } else if message.contains("HTTP 429") {
+                Some(FailureKind::Quota)
+            } else {
+                Some(FailureKind::Transient)
+            }
         }
     }
 }
@@ -46,10 +70,6 @@ fn idle_timeout() -> Duration {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(120))
-}
-
-fn is_context_retryable(error: &str) -> bool {
-    error.contains("stalled") || error.contains("empty response")
 }
 
 fn transport_error(action: &str, error: &reqwest::Error) -> String {
@@ -67,6 +87,10 @@ fn transport_error(action: &str, error: &reqwest::Error) -> String {
 
 impl GeminiWebClient {
     pub fn new(session: SessionData) -> Self {
+        Self::with_pool(Arc::new(AccountPool::single(session)))
+    }
+
+    pub fn with_pool(pool: Arc<AccountPool>) -> Self {
         let http = reqwest::Client::builder()
             // StreamGenerate can stay silent while Gemini analyzes a video.
             // A total-request timeout aborts healthy long-running generations,
@@ -76,18 +100,29 @@ impl GeminiWebClient {
             .build()
             .unwrap_or_default();
 
-        Self {
-            session: Arc::new(Mutex::new(session)),
-            http,
+        Self { pool, http }
+    }
+
+    pub fn pool(&self) -> Arc<AccountPool> {
+        self.pool.clone()
+    }
+
+    pub fn session(&self) -> Option<Arc<Mutex<SessionData>>> {
+        self.pool
+            .accounts()
+            .first()
+            .map(|account| account.session.clone())
+    }
+
+    pub async fn current_session(&self) -> Option<SessionData> {
+        match self.pool.accounts().first() {
+            Some(account) => Some(account.session.lock().await.clone()),
+            None => None,
         }
     }
 
-    pub fn session(&self) -> Arc<Mutex<SessionData>> {
-        self.session.clone()
-    }
-
-    pub async fn current_session(&self) -> SessionData {
-        self.session.lock().await.clone()
+    pub fn strategy(&self) -> BalanceStrategy {
+        self.pool.strategy()
     }
 
     /// Build verified Gemini 4 Argon payload array (99 elements).
@@ -249,59 +284,204 @@ impl GeminiWebClient {
         files: &[UploadedFile],
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
+        let lease = self.pool.lease().await;
+        let account = lease.account.clone();
+        let result = self
+            .run_turn(&account, prompt, files, delta_tx.clone())
+            .await;
+        drop(lease);
+
+        match result {
+            Ok(text) => {
+                self.pool.note_success(&account);
+                Ok(text)
+            }
+            Err(error) => {
+                account.note_failure(error.kind, &error.message);
+                let _ = delta_tx.send(Err(error.message.clone())).await;
+                Err(error.message)
+            }
+        }
+    }
+
+    /// Upload media with the account that will answer, then send the prompt.
+    /// A failed account is parked for its cooldown and the next account is
+    /// tried with a fresh upload, so uploads never cross account boundaries.
+    pub async fn send_prompt_stream_with_media(
+        &self,
+        prompt: &str,
+        media: &[MediaAttachment],
+        max_attachment_bytes: u64,
+        delta_tx: mpsc::Sender<Result<String, String>>,
+    ) -> Result<String, String> {
+        let attempt_cap = (self.pool.len().saturating_mul(2)).clamp(1, 4);
+        let mut last_error = "All Gemini accounts failed".to_string();
+        let mut tried: Vec<String> = Vec::new();
+
+        for attempt in 0..attempt_cap {
+            let lease = self.pool.lease().await;
+            let account = lease.account.clone();
+            if tried.contains(&account.name) && tried.len() >= self.pool.len() {
+                drop(lease);
+                break;
+            }
+            tried.push(account.name.clone());
+            info!(
+                "Account {} handling request (attempt {}/{}, balance {})",
+                account.name,
+                attempt + 1,
+                attempt_cap,
+                self.pool.strategy().label()
+            );
+
+            let mut files = Vec::with_capacity(media.len());
+            let mut upload_error = None;
+            if !media.is_empty() {
+                let cookie = account.session.lock().await.cookie.clone();
+                for attachment in media {
+                    match upload_attachment(&self.http, &cookie, attachment, max_attachment_bytes)
+                        .await
+                    {
+                        Ok(file) => {
+                            info!("[{}] Uploaded attachment: {}", account.name, file.name);
+                            files.push(file);
+                        }
+                        Err(error) => {
+                            upload_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if let Some(error) = upload_error {
+                let message = error.to_string();
+                match upload_failure_kind(&error) {
+                    Some(kind) => {
+                        info!(
+                            "Account {} upload failed ({}): {}",
+                            account.name,
+                            kind.label(),
+                            message
+                        );
+                        account.note_failure(kind, &message);
+                        last_error = message;
+                        drop(lease);
+                        continue;
+                    }
+                    None => {
+                        drop(lease);
+                        let _ = delta_tx.send(Err(message.clone())).await;
+                        return Err(message);
+                    }
+                }
+            }
+
+            let result = self
+                .run_turn(&account, prompt, &files, delta_tx.clone())
+                .await;
+            drop(lease);
+
+            match result {
+                Ok(text) => {
+                    self.pool.note_success(&account);
+                    return Ok(text);
+                }
+                Err(error) => {
+                    info!(
+                        "Account {} failed ({}): {}",
+                        account.name,
+                        error.kind.label(),
+                        error.message
+                    );
+                    account.note_failure(error.kind, &error.message);
+                    last_error = error.message;
+                    if error.streamed {
+                        let _ = delta_tx.send(Err(last_error.clone())).await;
+                        return Err(last_error);
+                    }
+                }
+            }
+        }
+
+        let _ = delta_tx.send(Err(last_error.clone())).await;
+        Err(last_error)
+    }
+
+    async fn run_turn(
+        &self,
+        account: &Account,
+        prompt: &str,
+        files: &[UploadedFile],
+        delta_tx: mpsc::Sender<Result<String, String>>,
+    ) -> Result<String, TurnError> {
         let had_context = {
-            let session = self.session.lock().await;
+            let session = account.session.lock().await;
             session.conversation_id.is_some() || session.response_id.is_some()
         };
 
-        let first = self.stream_attempt(prompt, files, delta_tx.clone()).await;
+        let first = self
+            .stream_attempt(account, prompt, files, delta_tx.clone())
+            .await;
         if first.error.is_none() && !first.text.trim().is_empty() {
             return Ok(first.text);
         }
 
-        let streamed_text = !first.text.is_empty();
+        let streamed = !first.text.is_empty();
         let first_error = first
             .error
             .clone()
             .unwrap_or_else(|| "Gemini Web returned an empty response".to_string());
+        let first_kind = first.kind.unwrap_or(FailureKind::Context);
         info!(
-            "Gemini Web attempt ended with {} chunks and {} characters: {}",
+            "[{}] Gemini Web attempt ended with {} chunks and {} characters: {}",
+            account.name,
             first.chunks,
             first.text.chars().count(),
             first_error
         );
-        self.reset_conversation("failed Gemini Web turn").await;
+        self.reset_conversation(account, "failed Gemini Web turn")
+            .await;
 
-        if had_context && !streamed_text && is_context_retryable(&first_error) {
+        if had_context && !streamed && first_kind == FailureKind::Context {
             info!(
-                "Retrying Gemini Web request once with a fresh conversation after: {}",
-                first_error
+                "[{}] Retrying once with a fresh conversation after: {}",
+                account.name, first_error
             );
-            let second = self.stream_attempt(prompt, files, delta_tx.clone()).await;
+            let second = self.stream_attempt(account, prompt, files, delta_tx).await;
             if second.error.is_none() && !second.text.trim().is_empty() {
                 return Ok(second.text);
             }
-            self.reset_conversation("failed Gemini Web retry").await;
-            let second_error = second
-                .error
-                .unwrap_or_else(|| "Gemini Web returned an empty response".to_string());
-            let _ = delta_tx.send(Err(second_error.clone())).await;
-            return Err(second_error);
+            self.reset_conversation(account, "failed Gemini Web retry")
+                .await;
+            return Err(TurnError {
+                message: second
+                    .error
+                    .unwrap_or_else(|| "Gemini Web returned an empty response".to_string()),
+                kind: second.kind.unwrap_or(FailureKind::Context),
+                streamed: !second.text.is_empty(),
+            });
         }
 
-        let _ = delta_tx.send(Err(first_error.clone())).await;
-        Err(first_error)
+        Err(TurnError {
+            message: first_error,
+            kind: first_kind,
+            streamed,
+        })
     }
 
-    async fn reset_conversation(&self, reason: &str) {
-        let mut session = self.session.lock().await;
+    async fn reset_conversation(&self, account: &Account, reason: &str) {
+        let mut session = account.session.lock().await;
         if session.conversation_id.is_none()
             && session.response_id.is_none()
             && session.choice_id.is_none()
         {
             return;
         }
-        info!("Clearing Gemini conversation context: {}", reason);
+        info!(
+            "[{}] Clearing Gemini conversation context: {}",
+            account.name, reason
+        );
         session.conversation_id = None;
         session.response_id = None;
         session.choice_id = None;
@@ -312,12 +492,13 @@ impl GeminiWebClient {
 
     async fn stream_attempt(
         &self,
+        account: &Account,
         prompt: &str,
         files: &[UploadedFile],
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> StreamAttempt {
-        let (snlm0e, f_sid, bl, cookie, conv_id, resp_id) = {
-            let s = self.session.lock().await;
+        let (snlm0e, f_sid, bl, cookie, conv_id, resp_id, base_url) = {
+            let s = account.session.lock().await;
             (
                 s.snlm0e.clone(),
                 s.f_sid.clone(),
@@ -325,6 +506,9 @@ impl GeminiWebClient {
                 s.cookie.clone(),
                 s.conversation_id.clone(),
                 s.response_id.clone(),
+                s.base_url
+                    .clone()
+                    .unwrap_or_else(|| "https://gemini.google.com".to_string()),
             )
         };
 
@@ -335,8 +519,11 @@ impl GeminiWebClient {
             % 10_000_000) as u64;
 
         let url = format!(
-            "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl={}&f.sid={}&hl=en&_reqid={}&rt=c",
-            bl, f_sid, req_id
+            "{}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl={}&f.sid={}&hl=en&_reqid={}&rt=c",
+            base_url.trim_end_matches('/'),
+            bl,
+            f_sid,
+            req_id
         );
 
         let f_req = Self::build_form_envelope_with_files(
@@ -378,7 +565,10 @@ impl GeminiWebClient {
             }
         }
 
-        info!("Sending native direct RPC to Gemini Web (StreamGenerate, Argon4p0)...");
+        info!(
+            "[{}] Sending native direct RPC to Gemini Web (StreamGenerate, Argon4p0)...",
+            account.name
+        );
 
         let response = match self
             .http
@@ -391,16 +581,25 @@ impl GeminiWebClient {
             Ok(resp) => resp,
             Err(e) => {
                 let err_msg = transport_error("Gemini Web request failed", &e);
-                return StreamAttempt::failed(err_msg);
+                return StreamAttempt::failed(err_msg, FailureKind::Transient);
             }
         };
 
         let status = response.status();
         if !status.is_success() {
             let err_msg = format!("Gemini Web returned HTTP {}", status.as_u16());
-            return StreamAttempt::failed(err_msg);
+            let kind = match status.as_u16() {
+                429 => FailureKind::Quota,
+                401 | 403 => FailureKind::Auth,
+                _ => FailureKind::Transient,
+            };
+            return StreamAttempt::failed(err_msg, kind);
         }
-        info!("Gemini Web response status: {}", status.as_u16());
+        info!(
+            "[{}] Gemini Web response status: {}",
+            account.name,
+            status.as_u16()
+        );
 
         let mut stream = response.bytes_stream();
         let mut full_text = String::new();
@@ -420,6 +619,7 @@ impl GeminiWebClient {
                 return StreamAttempt {
                     text: full_text,
                     error: Some(err_msg),
+                    kind: Some(FailureKind::Context),
                     chunks,
                 };
             }
@@ -435,6 +635,7 @@ impl GeminiWebClient {
                     return StreamAttempt {
                         text: full_text,
                         error: Some(err_msg),
+                        kind: Some(FailureKind::Context),
                         chunks,
                     };
                 }
@@ -447,7 +648,10 @@ impl GeminiWebClient {
             let chunk = match chunk_res {
                 Ok(c) => {
                     if first_chunk {
-                        info!("Gemini Web stream delivered its first chunk");
+                        info!(
+                            "[{}] Gemini Web stream delivered its first chunk",
+                            account.name
+                        );
                         first_chunk = false;
                     }
                     c
@@ -457,6 +661,7 @@ impl GeminiWebClient {
                     return StreamAttempt {
                         text: full_text,
                         error: Some(err_msg),
+                        kind: Some(FailureKind::Transient),
                         chunks,
                     };
                 }
@@ -494,7 +699,7 @@ impl GeminiWebClient {
 
         // Update session with conversation context if established
         if new_conv_id.is_some() || new_resp_id.is_some() || new_choice_id.is_some() {
-            let mut s = self.session.lock().await;
+            let mut s = account.session.lock().await;
             if let Some(cid) = new_conv_id {
                 s.conversation_id = Some(cid);
             }
@@ -508,13 +713,15 @@ impl GeminiWebClient {
         }
 
         info!(
-            "Gemini Web stream completed with {} characters in {} chunks",
+            "[{}] Gemini Web stream completed with {} characters in {} chunks",
+            account.name,
             full_text.chars().count(),
             chunks
         );
         StreamAttempt {
             text: full_text,
             error: None,
+            kind: None,
             chunks,
         }
     }
@@ -524,7 +731,12 @@ impl GeminiWebClient {
         media: &MediaAttachment,
         max_bytes: u64,
     ) -> Result<UploadedFile, UploadError> {
-        let cookie = self.session.lock().await.cookie.clone();
+        let Some(account) = self.pool.accounts().first() else {
+            return Err(UploadError::Invalid(
+                "No Gemini account is configured".to_string(),
+            ));
+        };
+        let cookie = account.session.lock().await.cookie.clone();
         upload_attachment(&self.http, &cookie, media, max_bytes).await
     }
 

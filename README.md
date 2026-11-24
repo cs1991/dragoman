@@ -208,7 +208,44 @@ Clients that omit the part `type` field still work when the part carries `image_
 
 The proxy clears its stored `conversation_id` and `response_id` when a turn fails or returns no text, then retries once with a fresh conversation. This removes the stuck state that follows an aborted or stalled Gemini turn. The stream watchdog aborts a turn after 120 seconds without upstream data and defaults can be changed with `DRAGOMAN_STREAM_IDLE_TIMEOUT_SECS`.
 
+HEVC and H.265 video is transcoded to H.264 with `ffmpeg` before upload. Gemini Web queues HEVC clips without ever streaming an answer, while the same clip as H.264 answers in seconds. The transcode uses `libx264 -preset veryfast -crf 23` plus AAC audio, keeps a temporary file in the system temp directory, and removes it after the upload. Set `DRAGOMAN_TRANSCODE=0` to upload the original bytes. `ffmpeg` and `ffprobe` must be on PATH for this step.
+
 The Gemini account must accept the video upload notice once. Send one video from `gemini.google.com` if a video request is blocked.
+
+---
+
+## Multiple Accounts and Load Balancing
+
+Every `*.json` file under `~/.config/dragoman/sessions` is one account. The legacy `~/.config/dragoman/session.json` loads as the account named `default`. Files with identical cookies are collapsed so one Google account is not counted twice.
+
+```bash
+dragoman login --account work
+dragoman login --account backup
+dragoman serve --balance round-robin
+```
+
+`login` writes `sessions/<name>.json` and prints the full path. Account names accept letters, digits, dash, underscore and dot.
+
+`serve` leases one account per turn. Media is uploaded with that account's cookie, then the prompt is sent on the same account. A failed turn parks the account for its cooldown and the next account retries with a fresh upload. Cooldowns are 300 seconds for quota errors, 1800 seconds for auth errors, 30 seconds for transport errors and 60 seconds for a stalled turn.
+
+`--balance round-robin` rotates accounts in file order. `--balance least-used` picks the account with the fewest completed turns. An account that is already serving a turn is skipped when another account is free, so two clients can run in parallel on different accounts.
+
+`GET /v1/accounts` returns the live pool state.
+
+```json
+{
+  "strategy": "round-robin",
+  "total_served": 12,
+  "accounts": [
+    {"name": "work", "model": "Argon4p0", "has_conversation": true, "served": 7, "failures": 0, "cooldown_seconds": 0, "last_error": null},
+    {"name": "backup", "model": "Argon4p0", "has_conversation": false, "served": 5, "failures": 1, "cooldown_seconds": 24, "last_error": "transient: The connection failed."}
+  ]
+}
+```
+
+`dragoman accounts` prints the configured accounts, their model, served count and cooldown state. Counters live in the running process, so a freshly started CLI shows zero.
+
+Each account keeps its own Gemini conversation context. A conversation that stalls is cleared and retried once before the account is parked.
 
 ---
 
@@ -220,6 +257,7 @@ Usage: dragoman [COMMAND]
 Commands:
   serve     Start the standalone OpenAI-compatible proxy server (no browser needed)
   login     Perform one-time browser login to extract and save session credentials
+  accounts  List configured accounts and their rotation state
   test-rpc  Test direct native HTTP RPC without browser
   help      Print this message or the help of the given subcommand(s)
 
@@ -229,6 +267,10 @@ Options:
 ```
 
 `serve --max-attachment-mb 200` changes the per-attachment size limit.
+
+`serve --balance least-used` switches from round-robin to least-used selection.
+
+`login --account NAME` selects the session file name, default `main`.
 
 `start.cmd` stops a previous Dragoman process using the same executable and port before it starts.
 
@@ -242,7 +284,8 @@ dragoman/
 ├── LICENSE             # MIT License
 ├── README.md           # Documentation
 └── src/
-    ├── main.rs         # CLI entry point (serve, login, test-rpc)
+    ├── main.rs         # CLI entry point (serve, login, accounts, test-rpc)
+    ├── accounts.rs     # Account pool, rotation strategy and cooldown state
     ├── browser/        # Chrome launcher and CDP client (used only during login)
     │   ├── cdp.rs
     │   ├── launcher.rs

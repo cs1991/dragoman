@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use dragoman::accounts::{AccountPool, BalanceStrategy, session_path_for_account};
 use dragoman::browser::{BrowserLauncher, CdpClient};
 use dragoman::proxy::server::{AppState, create_router};
 use dragoman::session::SessionData;
@@ -33,13 +34,23 @@ enum Commands {
         /// Maximum attachment size in MiB for video, image and file parts
         #[arg(long, default_value_t = 200)]
         max_attachment_mb: u64,
+
+        /// Account rotation strategy
+        #[arg(long, default_value = "round-robin", value_parser = ["round-robin", "least-used"])]
+        balance: String,
     },
     /// Perform one-time browser login to extract and save session credentials
     Login {
         /// Chrome DevTools Protocol (CDP) port used during login
         #[arg(long, default_value_t = 9222)]
         cdp_port: u16,
+
+        /// Account name used for the saved session file
+        #[arg(long, default_value = "main")]
+        account: String,
     },
+    /// List configured accounts and their rotation state
+    Accounts,
     /// Test direct native HTTP RPC without browser
     TestRpc {
         #[arg(default_value = "Say hello and confirm you are Gemini 4 Argon in 1 sentence.")]
@@ -61,16 +72,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         port: 8080,
         model: "gemini-4-argon".to_string(),
         max_attachment_mb: 200,
+        balance: "round-robin".to_string(),
     }) {
         Commands::Serve {
             port,
             model,
             max_attachment_mb,
+            balance,
         } => {
+            let strategy = BalanceStrategy::parse(&balance).unwrap_or(BalanceStrategy::RoundRobin);
             println!("=======================================================");
             println!(" Dragoman - Native Gemini Web OpenAI Bridge");
             println!(" Target Model: {}", model);
             println!(" Max Attachment: {} MiB", max_attachment_mb);
+            println!(" Balance Strategy: {}", strategy.label());
             println!(" Mode: Standalone HTTP/2 Direct RPC (Zero Browser Runtime)");
             println!(
                 " Proxy Endpoint: http://127.0.0.1:{}/v1/chat/completions",
@@ -78,18 +93,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("=======================================================\n");
 
-            let session = match SessionData::load() {
-                Ok(s) => s,
+            let pool = match AccountPool::load(strategy) {
+                Ok(pool) => pool,
                 Err(e) => {
                     eprintln!("Error: {}", e);
                     eprintln!(
-                        "Please run 'dragoman login' first to authenticate with your Google AI Pro account."
+                        "Please run 'dragoman login --account NAME' first to authenticate a Google AI Pro account."
                     );
                     std::process::exit(1);
                 }
             };
 
-            let web_client = Arc::new(GeminiWebClient::new(session));
+            println!(
+                " Loaded {} account session(s) from {}",
+                pool.len(),
+                SessionData::config_dir().display()
+            );
+            let web_client = Arc::new(GeminiWebClient::with_pool(Arc::new(pool)));
             let app_state = Arc::new(AppState {
                 web_client,
                 default_model: model,
@@ -113,8 +133,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             axum::serve(listener, router).await?;
         }
-        Commands::Login { cdp_port } => {
+        Commands::Login { cdp_port, account } => {
+            let session_path = match session_path_for_account(&account) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("Error: {}", error);
+                    std::process::exit(1);
+                }
+            };
             println!("=== Dragoman Initial Login & Credential Extraction ===");
+            println!("Account: {}", account);
+            println!("Session file: {}", session_path.display());
             println!(
                 "Ensuring Chrome is running with remote debugging on port {}...",
                 cdp_port
@@ -190,21 +219,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 conversation_id: None,
                 response_id: None,
                 choice_id: None,
+                base_url: None,
+                path: Some(session_path.clone()),
             };
 
             session.save()?;
             println!(
                 "\nSUCCESS: Saved authentication session to {}",
-                SessionData::config_path().display()
+                session_path.display()
             );
             println!("You can now close Chrome completely.");
             println!("Run 'dragoman serve' to launch the proxy without any browser running.");
         }
+        Commands::Accounts => {
+            let pool = match AccountPool::load(BalanceStrategy::RoundRobin) {
+                Ok(pool) => pool,
+                Err(error) => {
+                    eprintln!("Error: {}", error);
+                    std::process::exit(1);
+                }
+            };
+            let status = pool.status().await;
+            println!("Config directory: {}", SessionData::config_dir().display());
+            println!("Strategy: {}", status.strategy);
+            println!("Total served: {}", status.total_served);
+            println!();
+            println!(
+                "{:<20} {:<16} {:>7} {:>6} {:>9}  LAST ERROR",
+                "NAME", "MODEL", "SERVED", "FAILS", "COOLDOWN"
+            );
+            for account in &status.accounts {
+                println!(
+                    "{:<20} {:<16} {:>7} {:>6} {:>8}s  {}",
+                    account.name,
+                    account.model,
+                    account.served,
+                    account.failures,
+                    account.cooldown_seconds,
+                    account.last_error.as_deref().unwrap_or("-")
+                );
+            }
+        }
         Commands::TestRpc { prompt } => {
-            let session =
-                SessionData::load().map_err(|e| format!("Could not load session: {}", e))?;
-            println!("Loaded session for model {}", session.model);
-            let client = GeminiWebClient::new(session);
+            let pool = AccountPool::load(BalanceStrategy::RoundRobin)
+                .map_err(|e| format!("Could not load account sessions: {}", e))?;
+            println!("Loaded {} account session(s)", pool.len());
+            let client = GeminiWebClient::with_pool(Arc::new(pool));
             let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
             println!("Sending prompt: \"{}\"", prompt);

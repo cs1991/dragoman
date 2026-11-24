@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod browser;
 pub mod openai;
 pub mod proxy;

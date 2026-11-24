@@ -47,6 +47,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // The client API key is optional. Gemini authentication uses the saved session.
     Router::new()
         .route("/v1/models", get(list_models))
+        .route("/v1/accounts", get(list_accounts))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/health", get(health_check))
         .route("/", get(root_handler))
@@ -101,6 +102,11 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     })
 }
 
+async fn list_accounts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = state.web_client.pool().status().await;
+    Json(status)
+}
+
 async fn chat_completions(
     State(state): State<Arc<AppState>>,
     payload: Result<Json<ChatCompletionRequest>, JsonRejection>,
@@ -143,36 +149,12 @@ async fn chat_completions(
         );
     }
 
-    let mut files = Vec::with_capacity(media.len());
-    for attachment in &media {
-        match state
-            .web_client
-            .upload_media(attachment, state.max_attachment_bytes)
-            .await
-        {
-            Ok(file) => {
-                info!("Uploaded attachment: {}", file.name);
-                files.push(file);
-            }
-            Err(error) => {
-                let status =
-                    StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::BAD_GATEWAY);
-                let error_type = if status == StatusCode::BAD_GATEWAY {
-                    "upstream_error"
-                } else {
-                    "invalid_request_error"
-                };
-                return openai_error(status, error_type, error.to_string());
-            }
-        }
-    }
-
     let mut prompt = PromptTranslator::build_gemini_prompt(&req);
     let has_user_text = req
         .messages
         .iter()
         .any(|message| message.role == "user" && !message.content_as_str().trim().is_empty());
-    if !has_user_text && !files.is_empty() {
+    if !has_user_text && !media.is_empty() {
         if prompt.trim().is_empty() {
             prompt = "Please describe the attached file.".to_string();
         } else {
@@ -180,7 +162,7 @@ async fn chat_completions(
         }
     }
 
-    if prompt.trim().is_empty() && files.is_empty() {
+    if prompt.trim().is_empty() && media.is_empty() {
         return openai_error(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
@@ -197,9 +179,9 @@ async fn chat_completions(
     }
 
     info!(
-        "Prompt characters: {}, uploaded attachments: {}",
+        "Prompt characters: {}, attachments: {}",
         prompt.chars().count(),
-        files.len()
+        media.len()
     );
 
     let is_stream = req.stream.unwrap_or(false);
@@ -217,10 +199,16 @@ async fn chat_completions(
         // Spawn prompt submission and streaming task via direct native HTTP RPC
         let client = state.web_client.clone();
         let prompt_clone = prompt.clone();
-        let files_clone = files.clone();
+        let media_clone = media.clone();
+        let max_attachment_bytes = state.max_attachment_bytes;
         tokio::spawn(async move {
             if let Err(e) = client
-                .send_prompt_stream(&prompt_clone, &files_clone, delta_tx)
+                .send_prompt_stream_with_media(
+                    &prompt_clone,
+                    &media_clone,
+                    max_attachment_bytes,
+                    delta_tx,
+                )
                 .await
             {
                 error!("Prompt stream execution error: {}", e);
@@ -344,7 +332,7 @@ async fn chat_completions(
         let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
         match state
             .web_client
-            .send_prompt_stream(&prompt, &files, delta_tx)
+            .send_prompt_stream_with_media(&prompt, &media, state.max_attachment_bytes, delta_tx)
             .await
         {
             Ok(full_output) => {

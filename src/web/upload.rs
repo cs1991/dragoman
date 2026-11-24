@@ -5,6 +5,7 @@ use reqwest::multipart::{Form, Part};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 
 pub const UPLOAD_ENDPOINT: &str = "https://content-push.googleapis.com/upload";
 const UPLOAD_PUSH_ID: &str = "feeds/mcudyrk2a4khkz";
@@ -60,6 +61,22 @@ enum SourceData {
     AlreadyUploaded(String),
 }
 
+struct ResolvedSource {
+    data: SourceData,
+    cleanup: Option<PathBuf>,
+    transcoded: bool,
+}
+
+struct TempFile(Option<PathBuf>);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// Upload one attachment to Google's push endpoint and return the file reference
 /// that `StreamGenerate` expects in payload slot 0 index 3.
 pub async fn upload_attachment(
@@ -78,22 +95,35 @@ pub async fn upload_to_endpoint(
     media: &MediaAttachment,
     max_bytes: u64,
 ) -> Result<UploadedFile, UploadError> {
-    let source = resolve_source(media, max_bytes).await?;
+    let resolved = resolve_source(media, max_bytes).await?;
+    let transcoded = resolved.transcoded;
+    let _cleanup = TempFile(resolved.cleanup);
+    let source = resolved.data;
 
     let mime_hint = match &source {
         SourceData::Bytes { mime_hint, .. } => mime_hint.clone(),
         _ => None,
     };
 
-    let mime_type = media
-        .mime_type
-        .clone()
-        .or_else(|| media.filename.as_deref().and_then(mime_from_filename))
-        .or(mime_hint)
-        .or_else(|| default_mime(media.kind).map(str::to_string))
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let mime_type = if transcoded {
+        "video/mp4".to_string()
+    } else {
+        media
+            .mime_type
+            .clone()
+            .or_else(|| media.filename.as_deref().and_then(mime_from_filename))
+            .or(mime_hint)
+            .or_else(|| default_mime(media.kind).map(str::to_string))
+            .unwrap_or_else(|| "application/octet-stream".to_string())
+    };
 
-    let filename = resolve_filename(media, &mime_type);
+    let filename = if transcoded {
+        let name = resolve_filename(media, &mime_type);
+        let stem = name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(&name);
+        format!("{stem}.mp4")
+    } else {
+        resolve_filename(media, &mime_type)
+    };
 
     if let SourceData::AlreadyUploaded(path) = source {
         return Ok(UploadedFile {
@@ -171,14 +201,18 @@ pub async fn upload_to_endpoint(
 async fn resolve_source(
     media: &MediaAttachment,
     max_bytes: u64,
-) -> Result<SourceData, UploadError> {
-    match &media.source {
+) -> Result<ResolvedSource, UploadError> {
+    let resolved = match &media.source {
         MediaSource::DataUrl(url) => {
             let (mime, bytes) = decode_data_url(url, max_bytes)?;
-            Ok(SourceData::Bytes {
-                bytes,
-                mime_hint: if mime.is_empty() { None } else { Some(mime) },
-            })
+            ResolvedSource {
+                data: SourceData::Bytes {
+                    bytes,
+                    mime_hint: if mime.is_empty() { None } else { Some(mime) },
+                },
+                cleanup: None,
+                transcoded: false,
+            }
         }
         MediaSource::FilePath(path) => {
             let path = normalize_local_path(path);
@@ -197,19 +231,219 @@ async fn resolve_source(
             if metadata.len() > max_bytes {
                 return Err(too_large(metadata.len(), max_bytes));
             }
-            Ok(SourceData::File {
-                path,
-                length: metadata.len(),
-            })
+            ResolvedSource {
+                data: SourceData::File {
+                    path,
+                    length: metadata.len(),
+                },
+                cleanup: None,
+                transcoded: false,
+            }
         }
-        MediaSource::Url(url) => Ok(SourceData::Remote(url.clone())),
+        MediaSource::Url(url) => ResolvedSource {
+            data: SourceData::Remote(url.clone()),
+            cleanup: None,
+            transcoded: false,
+        },
         MediaSource::UploadedPath(path) => {
             let normalized = if path.starts_with('/') {
                 path.clone()
             } else {
                 format!("/{path}")
             };
-            Ok(SourceData::AlreadyUploaded(normalized))
+            ResolvedSource {
+                data: SourceData::AlreadyUploaded(normalized),
+                cleanup: None,
+                transcoded: false,
+            }
+        }
+    };
+
+    prepare_video(resolved, media).await
+}
+
+/// Gemini Web accepts H.264 reliably. HEVC uploads can sit in the processing
+/// queue and never produce a streamed answer, so convert HEVC to H.264 first.
+async fn prepare_video(
+    resolved: ResolvedSource,
+    media: &MediaAttachment,
+) -> Result<ResolvedSource, UploadError> {
+    if media.kind != MediaKind::Video || !transcode_enabled() {
+        return Ok(resolved);
+    }
+
+    let ResolvedSource {
+        data,
+        cleanup,
+        transcoded: _,
+    } = resolved;
+    match data {
+        SourceData::File { path, length } => match maybe_transcode(&path).await? {
+            Some(converted) => {
+                let length = tokio::fs::metadata(&converted)
+                    .await
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                Ok(ResolvedSource {
+                    data: SourceData::File {
+                        path: converted.clone(),
+                        length,
+                    },
+                    cleanup: Some(converted),
+                    transcoded: true,
+                })
+            }
+            None => Ok(ResolvedSource {
+                data: SourceData::File { path, length },
+                cleanup,
+                transcoded: false,
+            }),
+        },
+        SourceData::Bytes { bytes, mime_hint } => {
+            let input = temp_video_path("src");
+            tokio::fs::write(&input, &bytes)
+                .await
+                .map_err(|_| UploadError::Invalid("Attachment temp file failed".to_string()))?;
+            let converted = maybe_transcode(&input).await;
+            match converted {
+                Ok(Some(output)) => {
+                    let _ = tokio::fs::remove_file(&input).await;
+                    let length = tokio::fs::metadata(&output)
+                        .await
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0);
+                    Ok(ResolvedSource {
+                        data: SourceData::File {
+                            path: output.clone(),
+                            length,
+                        },
+                        cleanup: Some(output),
+                        transcoded: true,
+                    })
+                }
+                Ok(None) => {
+                    let _ = tokio::fs::remove_file(&input).await;
+                    Ok(ResolvedSource {
+                        data: SourceData::Bytes { bytes, mime_hint },
+                        cleanup,
+                        transcoded: false,
+                    })
+                }
+                Err(error) => {
+                    let _ = tokio::fs::remove_file(&input).await;
+                    Err(error)
+                }
+            }
+        }
+        other => Ok(ResolvedSource {
+            data: other,
+            cleanup,
+            transcoded: false,
+        }),
+    }
+}
+
+fn transcode_enabled() -> bool {
+    std::env::var("DRAGOMAN_TRANSCODE")
+        .map(|value| value.trim() != "0")
+        .unwrap_or(true)
+}
+
+fn temp_video_path(extension: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "dragoman-{}.{}",
+        uuid::Uuid::new_v4().simple(),
+        extension
+    ))
+}
+
+async fn probe_video_codec(path: &std::path::Path) -> Option<String> {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=nw=1:nk=1",
+        ])
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let codec = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_ascii_lowercase();
+    if codec.is_empty() { None } else { Some(codec) }
+}
+
+async fn maybe_transcode(input: &std::path::Path) -> Result<Option<PathBuf>, UploadError> {
+    let Some(codec) = probe_video_codec(input).await else {
+        return Ok(None);
+    };
+    if codec != "hevc" && codec != "h265" {
+        return Ok(None);
+    }
+    transcode_to_h264(input).await.map(Some)
+}
+
+async fn transcode_to_h264(input: &std::path::Path) -> Result<PathBuf, UploadError> {
+    let output = temp_video_path("mp4");
+    let mut child = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(input)
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(&output)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| UploadError::Upstream("ffmpeg is not available".to_string()))?;
+
+    match tokio::time::timeout(Duration::from_secs(900), child.wait()).await {
+        Ok(Ok(status)) if status.success() => {
+            tracing::info!(
+                "Transcoded HEVC video to H.264 before upload: {}",
+                output.display()
+            );
+            Ok(output)
+        }
+        Ok(_) => {
+            let _ = tokio::fs::remove_file(&output).await;
+            Err(UploadError::Upstream(
+                "HEVC video transcode failed".to_string(),
+            ))
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = tokio::fs::remove_file(&output).await;
+            Err(UploadError::Upstream(
+                "HEVC video transcode timed out".to_string(),
+            ))
         }
     }
 }

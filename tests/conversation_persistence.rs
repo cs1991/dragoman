@@ -154,6 +154,8 @@ async fn test_multi_turn_session_chaining_simulation() {
         conversation_id: None,
         response_id: None,
         choice_id: None,
+        base_url: None,
+        path: None,
     };
 
     // --- Turn 1 ---
@@ -260,6 +262,8 @@ fn test_session_serialization_backward_compatibility() {
         conversation_id: Some("c_conv_abc".to_string()),
         response_id: Some("r_resp_xyz".to_string()),
         choice_id: Some("rc_001".to_string()),
+        base_url: None,
+        path: None,
     };
 
     let serialized = serde_json::to_string(&full_session).unwrap();
