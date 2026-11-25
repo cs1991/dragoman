@@ -31,6 +31,7 @@ copy /Y "%DRAGOMAN_RELEASE_EXE%" "%packageDir%\dragoman.exe" >nul || goto :faile
 "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /warnaserror+ /codepage:65001 /target:winexe /reference:System.Web.Extensions.dll /out:"%packageDir%\DragomanGui.exe" "scripts\windows\DragomanGui.cs"
 if errorlevel 1 goto :failed
 copy /Y "scripts\windows\login.cmd" "%packageDir%\login.cmd" >nul || goto :failed
+copy /Y "scripts\windows\login-batch.cmd" "%packageDir%\login-batch.cmd" >nul || goto :failed
 copy /Y "scripts\windows\stop-dragoman.ps1" "%packageDir%\stop-dragoman.ps1" >nul || goto :failed
 copy /Y "scripts\windows\start.cmd" "%packageDir%\start.cmd" >nul || goto :failed
 copy /Y "README.md" "%packageDir%\README.md" >nul || goto :failed

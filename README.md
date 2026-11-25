@@ -357,6 +357,31 @@ dragoman login --account work --profile-dir D:/chrome-profiles/work --cdp-port 9
 dragoman login --account backup --profile-dir D:/chrome-profiles/backup --cdp-port 9224
 ```
 
+### Batch login
+
+`login-batch` signs in a list of Google accounts and writes one session file per account. The line format is `email----password---`, one account per line.
+
+```bash
+dragoman login-batch --file accounts.txt
+dragoman login-batch --text "first@example.asia----pass-one---\nsecond@example.asia----pass-two---"
+```
+
+With no `--file` and no `--text`, the command reads standard input. Paste the accounts, press Ctrl+Z, then press Enter. Passwords stay out of the process list when a file or standard input is used.
+
+Every account gets a Chrome profile under `desktop-profiles/batch-<name>.profile`. The profile keeps the trusted-device cookie, so a later run signs in with fewer prompts. Sessions are saved to `~/.config/dragoman/sessions/<name>.json` and are ready for `dragoman serve`.
+
+When Google asks for an email verification code, Dragoman posts the account email to `https://google111111.asia/` and reads the newest six digit code from that inbox. The wait limit is 120 seconds and can be changed with `--code-timeout`.
+
+```bash
+dragoman login-batch --file accounts.txt --proxy http://127.0.0.1:7901
+dragoman login-batch --file accounts.txt --start 11 --limit 10
+dragoman login-batch --file accounts.txt --dry-run
+```
+
+`--proxy` applies to the Chrome sign-in and is saved into every session, so the later RPC uses the same egress. `--start` and `--limit` select a slice for resuming a long list. `--dry-run` parses the list and prints the account count without opening Chrome. A failed account leaves a screenshot in `~/.config/dragoman/batch-login-shots`. The final report is `~/.config/dragoman/batch-login-report.json`.
+
+The Windows desktop app has a `批量登录` button next to `新增账号`. It accepts pasted text and `.txt` files.
+
 `serve` leases one account per turn. Media is uploaded with that account's cookie, then the prompt is sent on the same account. A failed turn parks the account for its cooldown and the next account retries with a fresh upload. Cooldowns are 300 seconds for quota errors, 1800 seconds for auth errors, 30 seconds for transport errors and 60 seconds for a stalled turn.
 
 `--balance round-robin` rotates accounts in file order. `--balance least-used` picks the account with the fewest completed turns. An account that is already serving a turn is skipped when another account is free, so two clients can run in parallel on different accounts.
@@ -388,6 +413,7 @@ Usage: dragoman [COMMAND]
 Commands:
   serve     Start the standalone OpenAI-compatible proxy server (no browser needed)
   login     Perform one-time browser login to extract and save session credentials
+  login-batch  Sign in many Google accounts from a file or pasted text
   accounts  List configured accounts and their rotation state
   test-rpc  Test direct native HTTP RPC without browser
   help      Print this message or the help of the given subcommand(s)

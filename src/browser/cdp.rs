@@ -36,6 +36,116 @@ pub struct CdpClient {
 }
 
 impl CdpClient {
+    /// Page targets exposed by the local DevTools endpoint.
+    pub async fn list_page_targets(cdp_port: u16) -> Result<Vec<CdpTarget>, String> {
+        let http_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|e| format!("Could not initialize the local CDP client: {e}"))?;
+        let list_url = format!("http://127.0.0.1:{}/json/list", cdp_port);
+        let targets: Vec<CdpTarget> = http_client
+            .get(&list_url)
+            .send()
+            .await
+            .map_err(|e| format!("Could not connect to CDP on port {}: {}", cdp_port, e))?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(targets
+            .into_iter()
+            .filter(|target| target.r#type == "page" && !target.url.starts_with("devtools://"))
+            .collect())
+    }
+
+    /// Attach to the first regular page. Batch login starts Chrome with
+    /// `about:blank`, so this is the tab the automation drives.
+    pub async fn connect_first_page(cdp_port: u16) -> Result<Self, String> {
+        let targets = Self::list_page_targets(cdp_port).await?;
+        let target = targets
+            .iter()
+            .find(|target| target.url == "about:blank")
+            .or_else(|| targets.first())
+            .ok_or_else(|| "Chrome opened without a page target".to_string())?;
+        let ws_url = target
+            .web_socket_debugger_url
+            .as_deref()
+            .ok_or_else(|| "Page target has no webSocketDebuggerUrl".to_string())?;
+        Self::open(ws_url).await
+    }
+
+    /// Navigate the attached page.
+    pub async fn navigate(&self, url: &str) -> Result<(), String> {
+        self.call_cdp("Page.navigate", json!({ "url": url }))
+            .await
+            .map(|_| ())
+    }
+
+    /// Insert text into the focused element through the input domain. The
+    /// resulting `input` event is treated as user input by the page.
+    pub async fn insert_text(&self, text: &str) -> Result<(), String> {
+        self.call_cdp("Input.insertText", json!({ "text": text }))
+            .await
+            .map(|_| ())
+    }
+
+    /// Press Enter in the focused field. Google's sign-in page accepts a
+    /// keyboard submit from the focused input even when a scripted button click
+    /// is being ignored.
+    pub async fn press_enter(&self) -> Result<(), String> {
+        self.call_cdp(
+            "Input.dispatchKeyEvent",
+            json!({
+                "type": "rawKeyDown",
+                "key": "Enter",
+                "code": "Enter",
+                "windowsVirtualKeyCode": 13,
+                "nativeVirtualKeyCode": 13
+            }),
+        )
+        .await?;
+        self.call_cdp(
+            "Input.dispatchKeyEvent",
+            json!({
+                "type": "char",
+                "text": "\r",
+                "unmodifiedText": "\r",
+                "key": "Enter",
+                "code": "Enter",
+                "windowsVirtualKeyCode": 13
+            }),
+        )
+        .await?;
+        self.call_cdp(
+            "Input.dispatchKeyEvent",
+            json!({
+                "type": "keyUp",
+                "key": "Enter",
+                "code": "Enter",
+                "windowsVirtualKeyCode": 13,
+                "nativeVirtualKeyCode": 13
+            }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Capture the visible viewport as PNG bytes. Used for failure screenshots
+    /// in batch login.
+    pub async fn screenshot_png(&self) -> Result<Vec<u8>, String> {
+        let value = self
+            .call_cdp(
+                "Page.captureScreenshot",
+                json!({ "format": "png", "captureBeyondViewport": false }),
+            )
+            .await?;
+        let data = value
+            .get("result")
+            .and_then(|result| result.get("data"))
+            .and_then(|data| data.as_str())
+            .ok_or_else(|| "Page.captureScreenshot returned no data".to_string())?;
+        decode_base64(data).ok_or_else(|| "Screenshot payload is not valid base64".to_string())
+    }
+
     pub async fn connect_to_gemini(cdp_port: u16) -> Result<Self, String> {
         Self::connect_to_gemini_tab(cdp_port, true).await
     }
@@ -403,4 +513,46 @@ impl CdpClient {
 
         Ok(full_output)
     }
+}
+
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let mut output = Vec::with_capacity(input.len() * 3 / 4);
+    let mut chunk = [0u8; 4];
+    let mut used = 0;
+    for byte in input.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            break;
+        }
+        chunk[used] = value(byte)?;
+        used += 1;
+        if used == 4 {
+            output.push((chunk[0] << 2) | (chunk[1] >> 4));
+            output.push((chunk[1] << 4) | (chunk[2] >> 2));
+            output.push((chunk[2] << 6) | chunk[3]);
+            used = 0;
+        }
+    }
+    match used {
+        2 => output.push((chunk[0] << 2) | (chunk[1] >> 4)),
+        3 => {
+            output.push((chunk[0] << 2) | (chunk[1] >> 4));
+            output.push((chunk[1] << 4) | (chunk[2] >> 2));
+        }
+        _ => {}
+    }
+    Some(output)
 }

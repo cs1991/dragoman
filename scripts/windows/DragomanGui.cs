@@ -29,7 +29,7 @@ internal sealed class DragomanGui : Form
     private readonly NumericUpDown port = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = 8080, Width = 78 };
     private readonly NumericUpDown share = new NumericUpDown { Minimum = 1, Maximum = 100, Value = 1, Width = 52 };
     private readonly ComboBox strategy = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
-    private readonly Button start, stop, copy, add, loginAgain, toggle, remove, setProxy, bulkProxy, refresh, cancelLogin;
+    private readonly Button start, stop, copy, add, batchLogin, loginAgain, toggle, remove, setProxy, bulkProxy, refresh, cancelLogin;
     private Process server, login;
     private bool busy, ready, closing, stopping, loginCanceled;
     private Account Selected { get { return accounts.SelectedItems.Count == 0 ? null : (Account)accounts.SelectedItems[0].Tag; } }
@@ -99,6 +99,7 @@ internal sealed class DragomanGui : Form
         layout.Controls.Add(accounts, 0, 3);
         var accountBar = Bar(layout, 4);
         add = Button(accountBar, "新增账号", async () => await Run(AddAccount));
+        batchLogin = Button(accountBar, "批量登录", async () => await Run(BatchLogin));
         loginAgain = Button(accountBar, "重新登录", async () => await Run(() => LogIn(Selected.id, Selected.proxy)));
         setProxy = Button(accountBar, "设置代理", async () => await Run(EditProxy));
         bulkProxy = Button(accountBar, "批量分配代理", async () => await Run(AssignProxies));
@@ -137,7 +138,7 @@ internal sealed class DragomanGui : Form
     {
         var selected = Selected;
         bool edit = !busy && server == null && !closing;
-        add.Enabled = port.Enabled = strategy.Enabled = share.Enabled = edit;
+        add.Enabled = batchLogin.Enabled = port.Enabled = strategy.Enabled = share.Enabled = edit;
         remove.Enabled = toggle.Enabled = loginAgain.Enabled = setProxy.Enabled = edit && selected != null;
         bulkProxy.Enabled = edit;
         toggle.Text = selected != null && !selected.enabled ? "启用" : "停用";
@@ -398,6 +399,119 @@ internal sealed class DragomanGui : Form
         if (line.Contains("已识别登录")) return "已识别登录状态，正在保存账号…";
         if (line.Contains("监听登录状态")) return "正在监听登录状态。完成 Google 登录后账号会自动添加。";
         return null;
+    }
+
+    private async Task BatchLogin()
+    {
+        using (var dialog = new Form
+        {
+            Text = "批量登录",
+            ClientSize = new Size(620, 460),
+            MinimumSize = new Size(520, 360),
+            StartPosition = FormStartPosition.CenterParent,
+            Font = Font
+        })
+        {
+            var hint = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 58,
+                Padding = new Padding(4, 6, 4, 6),
+                Text = "每行一个账号：邮箱----密码---  可粘贴，也可从文件导入。"
+                    + "登录需要验证码时，程序会自动从 google111111.asia 读取。"
+            };
+            var box = new TextBox
+            {
+                Multiline = true,
+                Dock = DockStyle.Fill,
+                ScrollBars = ScrollBars.Both,
+                AcceptsReturn = true,
+                WordWrap = false,
+                Font = new Font("Consolas", 9)
+            };
+            var bottom = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Bottom,
+                FlowDirection = FlowDirection.RightToLeft,
+                AutoSize = true,
+                Padding = new Padding(0, 8, 0, 0)
+            };
+            var ok = new Button { Text = "开始登录", AutoSize = true, DialogResult = DialogResult.OK };
+            var cancel = new Button { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
+            var import = new Button { Text = "导入文件", AutoSize = true };
+            import.Click += (s, e) =>
+            {
+                using (var pick = new OpenFileDialog
+                {
+                    Filter = "文本文件 (*.txt)|*.txt|所有文件 (*.*)|*.*",
+                    Title = "导入账号文件"
+                })
+                {
+                    if (pick.ShowDialog(dialog) != DialogResult.OK) return;
+                    try { box.Text = File.ReadAllText(pick.FileName); }
+                    catch (Exception error)
+                    {
+                        MessageBox.Show(dialog, error.Message, "Dragoman");
+                    }
+                }
+            };
+            bottom.Controls.Add(cancel);
+            bottom.Controls.Add(ok);
+            bottom.Controls.Add(import);
+            dialog.Controls.Add(box);
+            dialog.Controls.Add(bottom);
+            dialog.Controls.Add(hint);
+            dialog.AcceptButton = ok;
+            dialog.CancelButton = cancel;
+
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            var text = box.Text.Trim();
+            if (text.Length == 0) throw new InvalidOperationException("请粘贴或导入账号。");
+            var path = Path.Combine(Path.GetTempPath(), "dragoman-batch-" + Guid.NewGuid().ToString("N") + ".txt");
+            File.WriteAllText(path, text, new UTF8Encoding(false));
+            try { await RunBatchFile(path); }
+            finally
+            {
+                try { File.Delete(path); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+    }
+
+    private async Task RunBatchFile(string path)
+    {
+        loginCanceled = false;
+        var child = Spawn("login-batch --file=\"" + path + "\"");
+        login = child;
+        message.Text = "批量登录进行中。Chrome 会为每个账号打开一个独立窗口。";
+        UpdateButtons();
+        try
+        {
+            var output = Task.Run(async () =>
+            {
+                string line;
+                while ((line = await child.StandardOutput.ReadLineAsync()) != null)
+                {
+                    var text = line.Trim();
+                    if (text.Length == 0 || IsDisposed || !IsHandleCreated) continue;
+                    try { BeginInvoke(new Action(() => { if (!IsDisposed) message.Text = text; })); }
+                    catch (InvalidOperationException) { }
+                }
+            });
+            var error = child.StandardError.ReadToEndAsync();
+            await Task.Run(() => child.WaitForExit());
+            await Task.WhenAny(Task.WhenAll(output, error), Task.Delay(1500));
+            if (loginCanceled) message.Text = "已取消批量登录。已完成的账号会保留。";
+            else if (child.ExitCode == 0) message.Text = "批量登录完成，账号已加入列表。";
+            else message.Text = "批量登录结束，有账号失败。详见 batch-login-report.json。";
+            await RefreshAccounts();
+        }
+        finally
+        {
+            child.Dispose();
+            login = null;
+        }
     }
 
     private async Task ToggleAccount()

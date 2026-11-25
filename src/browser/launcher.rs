@@ -3,6 +3,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use tracing::info;
 
+use crate::browser::cdp::CdpClient;
+use serde_json::json;
+
 pub struct BrowserLauncher;
 
 impl BrowserLauncher {
@@ -96,24 +99,68 @@ impl BrowserLauncher {
         data_dir: PathBuf,
         proxy: Option<&str>,
     ) -> Result<(u16, std::process::Child), String> {
-        std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
-        let port_file = data_dir.join("DevToolsActivePort");
-        let previous = std::fs::read_to_string(&port_file).ok();
-        let port_flag = "--remote-debugging-port=0".to_string();
-        let user_data_flag = format!("--user-data-dir={}", data_dir.display());
-        let args = chrome_args(
+        Self::start_login_window(
+            data_dir,
+            proxy,
+            "https://gemini.google.com/app",
+            &["--no-first-run", "--no-default-browser-check"],
+            false,
+        )
+        .await
+    }
+
+    /// Start one isolated Chrome window for a batch login attempt. The window
+    /// opens blank because the caller navigates to Google itself.
+    pub async fn start_batch_login(
+        data_dir: PathBuf,
+        proxy: Option<&str>,
+    ) -> Result<(u16, std::process::Child), String> {
+        Self::start_login_window(
+            data_dir,
+            proxy,
+            "about:blank",
             &[
                 "--no-first-run",
                 "--no-default-browser-check",
-                &port_flag,
-                &user_data_flag,
-                "https://gemini.google.com/app",
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1280,900",
             ],
-            proxy,
-        );
+            true,
+        )
+        .await
+    }
+
+    async fn start_login_window(
+        data_dir: PathBuf,
+        proxy: Option<&str>,
+        start_url: &str,
+        extra_flags: &[&str],
+        take_over: bool,
+    ) -> Result<(u16, std::process::Child), String> {
+        std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
+        let port_file = data_dir.join("DevToolsActivePort");
+        // A killed Chrome leaves DevToolsActivePort behind. A batch account is
+        // retried after a failure, so close a browser that still owns the
+        // profile and drop the stale file before the new launch.
+        if take_over {
+            Self::close_existing_browser(&port_file).await;
+        }
+        let previous = if take_over {
+            let _ = std::fs::remove_file(&port_file);
+            None
+        } else {
+            std::fs::read_to_string(&port_file).ok()
+        };
+        let port_flag = "--remote-debugging-port=0".to_string();
+        let user_data_flag = format!("--user-data-dir={}", data_dir.display());
+        let mut base = extra_flags.to_vec();
+        base.push(&port_flag);
+        base.push(&user_data_flag);
+        base.push(start_url);
+        let args = chrome_args(&base, proxy);
         let mut chrome = Self::spawn_native_chrome(&args).map_err(|error| error.to_string())?;
 
-        for _ in 0..60 {
+        for _ in 0..100 {
             if chrome
                 .try_wait()
                 .map_err(|error| error.to_string())?
@@ -131,6 +178,34 @@ impl BrowserLauncher {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
         Err("Chrome did not open a login session in time".into())
+    }
+
+    /// Close the browser recorded in `DevToolsActivePort` when it is still
+    /// listening. Killing the Chrome process skips cleanup, so the next batch
+    /// attempt has to take the profile back through CDP.
+    async fn close_existing_browser(port_file: &std::path::Path) {
+        let Ok(text) = std::fs::read_to_string(port_file) else {
+            return;
+        };
+        let Some(port) = text
+            .lines()
+            .next()
+            .and_then(|line| line.trim().parse::<u16>().ok())
+        else {
+            return;
+        };
+        if !Self::is_cdp_ready(port).await {
+            return;
+        }
+        if let Ok(client) = CdpClient::connect_browser(port).await {
+            let _ = client.call_cdp("Browser.close", json!({})).await;
+        }
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if !Self::is_cdp_ready(port).await {
+                break;
+            }
+        }
     }
 
     pub async fn ensure_chrome_running(

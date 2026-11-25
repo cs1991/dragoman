@@ -2,9 +2,11 @@ use clap::{Parser, Subcommand};
 use dragoman::accounts::{AccountPool, BalanceStrategy, session_path_for_account};
 use dragoman::browser::{BrowserLauncher, CdpClient, default_profile_dir};
 use dragoman::desktop_accounts::AccountStore;
+use dragoman::login_batch::{BatchOptions, parse_credentials, run_batch};
 use dragoman::proxy::server::{AppState, create_router};
 use dragoman::session::SessionData;
 use dragoman::web::GeminiWebClient;
+use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{info, level_filters::LevelFilter};
@@ -63,6 +65,40 @@ enum Commands {
 
         #[arg(long, hide = true)]
         desktop_id: Option<String>,
+    },
+    /// Sign in many Google accounts and save one Gemini session per account
+    LoginBatch {
+        /// Account file, one `email----password---` per line
+        #[arg(short, long)]
+        file: Option<std::path::PathBuf>,
+
+        /// Account lines passed directly, `\n` is accepted as a line break
+        #[arg(long)]
+        text: Option<String>,
+
+        /// Egress proxy for every account, for example http://127.0.0.1:7901
+        #[arg(long)]
+        proxy: Option<String>,
+
+        /// First account to log in, 1 based
+        #[arg(long, default_value_t = 1)]
+        start: usize,
+
+        /// Maximum number of accounts to log in, 0 means all
+        #[arg(long, default_value_t = 0)]
+        limit: usize,
+
+        /// Seconds to wait for a verification code from google111111.asia
+        #[arg(long, default_value_t = 120)]
+        code_timeout: u64,
+
+        /// Leave every Chrome window open after its account finishes
+        #[arg(long)]
+        keep_open: bool,
+
+        /// Parse and list the accounts without opening Chrome
+        #[arg(long)]
+        dry_run: bool,
     },
     /// List configured accounts and their rotation state
     Accounts,
@@ -311,6 +347,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("Chrome 窗口保持打开，关闭与否都不影响使用。");
             println!("Run 'dragoman serve' to launch the proxy without any browser running.");
+        }
+        Commands::LoginBatch {
+            file,
+            text,
+            proxy,
+            start,
+            limit,
+            code_timeout,
+            keep_open,
+            dry_run,
+        } => {
+            let raw = match (file, text) {
+                (Some(path), _) => std::fs::read_to_string(&path)
+                    .map_err(|error| format!("读取账号文件失败 {}: {}", path.display(), error))?,
+                (None, Some(text)) => text.replace("\\n", "\n"),
+                (None, None) => {
+                    println!("粘贴账号，每行一个，格式：email----password---");
+                    println!("粘贴完成后按 Ctrl+Z 再回车：");
+                    let mut buffer = String::new();
+                    std::io::stdin().read_to_string(&mut buffer)?;
+                    buffer
+                }
+            };
+            let mut credentials = parse_credentials(&raw)?;
+            let skip = start.saturating_sub(1);
+            if skip >= credentials.len() {
+                return Err(format!("--start 超出范围：共有 {} 个账号", credentials.len()).into());
+            }
+            credentials.drain(..skip);
+            if limit > 0 && credentials.len() > limit {
+                credentials.truncate(limit);
+            }
+
+            println!("待登录账号：{} 个", credentials.len());
+            if dry_run {
+                for (index, credential) in credentials.iter().enumerate() {
+                    println!(
+                        "{}. {}  密码长度 {}",
+                        index + 1,
+                        credential.email,
+                        credential.password.chars().count()
+                    );
+                }
+                return Ok(());
+            }
+
+            let options = BatchOptions {
+                proxy,
+                keep_open,
+                code_timeout: std::time::Duration::from_secs(code_timeout.max(10)),
+            };
+            let results = run_batch(&credentials, &options).await;
+            let succeeded = results.iter().filter(|result| result.ok).count();
+            let failed = results.len() - succeeded;
+            let report_path = SessionData::config_dir().join("batch-login-report.json");
+            if let Some(parent) = report_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(&results) {
+                let _ = std::fs::write(&report_path, json);
+            }
+            println!();
+            println!("批量登录完成：成功 {}，失败 {}", succeeded, failed);
+            println!("报告：{}", report_path.display());
+            println!("会话目录：{}", SessionData::sessions_dir().display());
+            if failed > 0 {
+                std::process::exit(1);
+            }
         }
         Commands::DesktopAccounts { action } => {
             let store = AccountStore::new(SessionData::config_dir());
