@@ -860,8 +860,8 @@ async fn ensure_gemini_app(client: &CdpClient) -> Result<(), String> {
         // shapes, the signed-in overlay and the signed-out landing page. It is
         // probed before the app check so a valid token never leaves the dialog
         // covering the page.
-        if dismiss_gemini_onboarding(client).await {
-            println!("  关闭 Gemini 引导弹窗");
+        if let Some(label) = dismiss_gemini_onboarding(client).await {
+            println!("  关闭 Gemini 引导弹窗（{label}）");
             tokio::time::sleep(Duration::from_secs(3)).await;
             attempt = attempt.saturating_add(1);
             if attempt > 12 {
@@ -907,7 +907,7 @@ async fn ensure_gemini_app(client: &CdpClient) -> Result<(), String> {
 /// The control is clicked with a trusted mouse event at its center, then a
 /// synthetic element click is used only when the control is still present, so
 /// the dialog closes once and the background page is never clicked.
-async fn dismiss_gemini_onboarding(client: &CdpClient) -> bool {
+async fn dismiss_gemini_onboarding(client: &CdpClient) -> Option<String> {
     let script = r#"(() => {
         const shown = el => {
             if (!el || !el.isConnected) return false;
@@ -916,32 +916,64 @@ async fn dismiss_gemini_onboarding(client: &CdpClient) -> bool {
             const rect = el.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0;
         };
-        const wanted = ['use gemini', '使用 gemini', 'chat with gemini', '开始使用', 'get started'];
-        const nodes = Array.from(document.querySelectorAll('button, [role="button"], a'));
-        for (const el of nodes) {
-            if (!shown(el)) continue;
-            const text = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || ''))
-                .replace(/\s+/g, ' ').trim();
-            if (!text || text.length > 60) continue;
-            const lower = text.toLowerCase();
-            if (!wanted.some(w => lower === w || lower.includes(w))) continue;
-            el.scrollIntoView({ block: 'center', inline: 'center' });
-            const rect = el.getBoundingClientRect();
-            if (rect.width < 8 || rect.height < 8) continue;
-            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: text.slice(0, 40) };
+        const wanted = ['use gemini', '使用 gemini', '开始使用', 'get started', 'chat with gemini', 'no thanks', '不用了'];
+        const nodes = Array.from(document.querySelectorAll('button, [role="button"], [role="link"], [role="menuitem"], [role="option"], a, div[jsname], div[jscontroller]'));
+        const find = exact => {
+            for (const w of wanted) {
+                for (const el of nodes) {
+                    if (!shown(el)) continue;
+                    const text = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || ''))
+                        .replace(/\s+/g, ' ').trim();
+                    if (!text || text.length > 60) continue;
+                    const lower = text.toLowerCase();
+                    if (exact ? lower !== w : !lower.includes(w)) continue;
+                    el.scrollIntoView({ block: 'center', inline: 'center' });
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width < 8 || rect.height < 8) continue;
+                    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: text.slice(0, 40) };
+                }
+            }
+            return null;
+        };
+        const hit = find(true) || find(false);
+        if (hit) return hit;
+        // The dialog controls live in custom elements. Use the smallest
+        // element whose text is exactly the wanted label.
+        for (const w of wanted) {
+            let best = null;
+            for (const el of document.querySelectorAll('*')) {
+                if (!shown(el)) continue;
+                const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                if (text.toLowerCase() !== w) continue;
+                const target = el.closest('button, a, [role="button"], [role="link"]') || el;
+                const rect = target.getBoundingClientRect();
+                if (rect.width < 8 || rect.height < 8) continue;
+                if (!best || rect.width * rect.height < best.area) {
+                    best = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, text: text.slice(0, 40), area: rect.width * rect.height };
+                }
+            }
+            if (best) {
+                delete best.area;
+                return best;
+            }
         }
         return null;
     })()"#;
     let value = match client.evaluate_js(script).await {
         Ok(value) => value,
-        Err(_) => return false,
+        Err(_) => return None,
     };
     let (Some(x), Some(y)) = (
         value.get("x").and_then(|value| value.as_f64()),
         value.get("y").and_then(|value| value.as_f64()),
     ) else {
-        return false;
+        return None;
     };
+    let label = value
+        .get("text")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
     mouse_click(client, x, y).await;
     tokio::time::sleep(Duration::from_millis(600)).await;
 
@@ -953,23 +985,23 @@ async fn dismiss_gemini_onboarding(client: &CdpClient) -> bool {
             const rect = el.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0;
         };
-        const wanted = ['use gemini', '使用 gemini', 'chat with gemini', '开始使用', 'get started'];
-        for (const el of document.querySelectorAll('button, [role="button"], a')) {
-            if (!shown(el)) continue;
-            const text = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || ''))
-                .replace(/\s+/g, ' ').trim();
-            if (!text || text.length > 60) continue;
-            const lower = text.toLowerCase();
-            if (!wanted.some(w => lower === w || lower.includes(w))) continue;
-            el.click();
-            return true;
+        const wanted = ['use gemini', '使用 gemini', '开始使用', 'get started', 'chat with gemini', 'no thanks', '不用了'];
+        const nodes = Array.from(document.querySelectorAll('button, [role="button"], [role="link"], [role="menuitem"], [role="option"], a, div[jsname], div[jscontroller]'));
+        for (const w of wanted) {
+            for (const el of nodes) {
+                if (!shown(el)) continue;
+                const text = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || ''))
+                    .replace(/\s+/g, ' ').trim();
+                if (!text || text.length > 60) continue;
+                if (!text.toLowerCase().includes(w)) continue;
+                el.click();
+                return true;
+            }
         }
         return false;
     })()"#;
-    matches!(
-        client.evaluate_js(fallback).await,
-        Ok(serde_json::Value::Bool(true))
-    )
+    let _ = client.evaluate_js(fallback).await;
+    Some(label)
 }
 
 async fn capture_session(
