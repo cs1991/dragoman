@@ -380,6 +380,8 @@ dragoman login-batch --file accounts.txt --dry-run
 
 `--proxy` applies to the Chrome sign-in and is saved into every session, so the later RPC uses the same egress. `--start` and `--limit` select a slice for resuming a long list. `--dry-run` parses the list and prints the account count without opening Chrome. A failed account leaves a screenshot in `~/.config/dragoman/batch-login-shots`. The final report is `~/.config/dragoman/batch-login-report.json`.
 
+An account whose session file already holds a token and cookies is skipped, so re-running the same list only signs in the new accounts. Pass `--force` to sign in every listed account again.
+
 The Windows desktop app has a `批量登录` button next to `新增账号`. It accepts pasted text and `.txt` files.
 
 `serve` leases one account per turn. Media is uploaded with that account's cookie, then the prompt is sent on the same account. A failed turn parks the account for its cooldown and the next account retries with a fresh upload. Cooldowns are 300 seconds for quota errors, 1800 seconds for auth errors, 30 seconds for transport errors and 60 seconds for a stalled turn.

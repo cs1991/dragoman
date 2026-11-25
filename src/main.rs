@@ -2,7 +2,10 @@ use clap::{Parser, Subcommand};
 use dragoman::accounts::{AccountPool, BalanceStrategy, session_path_for_account};
 use dragoman::browser::{BrowserLauncher, CdpClient, default_profile_dir};
 use dragoman::desktop_accounts::AccountStore;
-use dragoman::login_batch::{BatchOptions, parse_credentials, read_account_file, run_batch};
+use dragoman::login_batch::{
+    BatchOptions, account_name_for_email, has_saved_session, parse_credentials, read_account_file,
+    run_batch,
+};
 use dragoman::proxy::server::{AppState, create_router};
 use dragoman::session::SessionData;
 use dragoman::web::GeminiWebClient;
@@ -95,6 +98,10 @@ enum Commands {
         /// Leave every Chrome window open after its account finishes
         #[arg(long)]
         keep_open: bool,
+
+        /// Log in again even when the account already has a saved session
+        #[arg(long)]
+        force: bool,
 
         /// Parse and list the accounts without opening Chrome
         #[arg(long)]
@@ -356,6 +363,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             limit,
             code_timeout,
             keep_open,
+            force,
             dry_run,
         } => {
             let raw = match (file, text) {
@@ -382,13 +390,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("待登录账号：{} 个", credentials.len());
             if dry_run {
                 for (index, credential) in credentials.iter().enumerate() {
+                    let logged_in = has_saved_session(&account_name_for_email(&credential.email));
                     println!(
-                        "{}. {}  密码长度 {}{}",
+                        "{}. {}  密码长度 {}{}{}",
                         index + 1,
                         credential.email,
                         credential.password.chars().count(),
                         if credential.totp_secret().is_some() {
                             "  2FA 密钥"
+                        } else {
+                            ""
+                        },
+                        if logged_in && !force {
+                            "  已登录，将跳过"
                         } else {
                             ""
                         }
@@ -401,6 +415,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 proxy,
                 keep_open,
                 code_timeout: std::time::Duration::from_secs(code_timeout.max(10)),
+                skip_logged_in: !force,
             };
             let results = run_batch(&credentials, &options).await;
             let succeeded = results.iter().filter(|result| result.ok).count();
