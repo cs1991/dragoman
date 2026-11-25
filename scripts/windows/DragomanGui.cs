@@ -388,12 +388,36 @@ internal sealed class DragomanGui : Form
             usable |= account.enabled && account.model != null;
         }
         if (!usable) throw new InvalidOperationException("请先登录并启用至少一个账号。");
+        await StopPrevious();
         var child = Spawn("serve --desktop --port " + port.Value + " --balance " +
             (strategy.SelectedIndex == 0 ? "round-robin" : "least-used"), true);
         server = child;
         message.Text = "正在启动本地代理…";
         // The monitor owns the process until stdout and stderr have closed.
         MonitorProxy(child);
+    }
+
+    private async Task StopPrevious()
+    {
+        var script = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "stop-dragoman.ps1");
+        if (!File.Exists(script)) return;
+        var info = new ProcessStartInfo("powershell.exe",
+            "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script + "\""
+            + " -ExecutablePath \"" + executable + "\" -Port " + port.Value)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        using (var child = Process.Start(info))
+        {
+            if (child == null) return;
+            var drain = child.StandardOutput.ReadToEndAsync();
+            var error = child.StandardError.ReadToEndAsync();
+            await Task.Run(() => child.WaitForExit(15000));
+            await Task.WhenAll(drain, error);
+        }
     }
 
     private async void MonitorProxy(Process child)
