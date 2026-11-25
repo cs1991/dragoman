@@ -124,81 +124,92 @@ Dragoman uses the Windows system proxy when an account has no `proxy` field. If 
 
 ## Per-Account Egress Proxy
 
-Each saved session can carry its own egress proxy. Dragoman builds one HTTP client per account and sends both attachment uploads and `StreamGenerate` calls through that proxy. Gemini sees the address of the proxy node instead of the Windows system proxy. Accounts that name the same listener share one public address.
+Each saved session can carry its own egress route. Dragoman builds one HTTP client per account and sends both attachment uploads and `StreamGenerate` calls through that route. Gemini sees the address of the proxy node instead of the Windows system proxy.
 
-The session field is `proxy`.
+The session fields are `proxy` and `local_ip`.
 
 ```json
 {
-  "proxy": "http://127.0.0.1:7911"
+  "proxy": "http://127.0.0.1:7897",
+  "local_ip": "127.0.0.7"
 }
 ```
 
-A bare `127.0.0.1:7911` is accepted. `dragoman accounts` prints the host and port in the PROXY column and hides any userinfo.
+The proxy port stays at the single Clash Verge mixed port, 7897. `local_ip` binds the client socket to one loopback address and Clash picks the node with a `SRC-IP-CIDR` rule that matches that address. Fifty accounts can share port 7897 and still leave through fifty different nodes. Sessions that name the same `local_ip` share one public address. A bare `127.0.0.1:7897` is accepted. `dragoman accounts` prints the proxy in the PROXY column and the source address in the LOCAL IP column.
 
-### Clash Verge listeners
+### Clash Verge source rules
 
-Clash Verge exposes one mixed listener per node. Add `listeners` entries to the profile Merge file and reload the profile.
+Clash Verge 2.4.7 copies unknown Merge keys into the generated config without applying them, so the rules go into the global Script instead. The Script runs on every profile activation and on every subscription update.
 
-```yaml
-listeners:
-  - name: dg-7911
-    type: mixed
-    port: 7911
-    listen: 127.0.0.1
-    proxy: "🇯🇵 Japan | 01"
+```javascript
+const dragomanSrcRules = [
+  "SRC-IP-CIDR,127.0.0.2/32,🇦🇷 Argentina | 01",
+  "SRC-IP-CIDR,127.0.0.3/32,🇦🇺 Australia | 01",
+];
+
+function main(config, profileName) {
+  const rules = Array.isArray(config.rules) ? config.rules : [];
+  const known = new Set(rules);
+  const missing = dragomanSrcRules.filter((rule) => !known.has(rule));
+  config.rules = missing.concat(rules);
+  return config;
+}
 ```
 
-`scripts\windows\clash-listeners.ps1` reads the running Clash controller and writes the block for you. It reads the controller secret from the Clash Verge `config.yaml` when `-Secret` is omitted.
+`scripts\windows\clash-src-rules.ps1` reads the running Clash controller, takes the real node names and writes the Script for you. It reads the controller secret from the Clash Verge `config.yaml` when `-Secret` is omitted. The old `prepend-rules` and `listeners` blocks are removed from Merge.yaml.
 
 ```powershell
-# 50 accounts, one node per account, ports 7911 to 7960
-powershell -ExecutionPolicy Bypass -File scripts\windows\clash-listeners.ps1 -StartPort 7911 -Count 50 -AccountsPerPort 1 -WriteMerge
+# 50 accounts, one source address and one node per account
+powershell -ExecutionPolicy Bypass -File scripts\windows\clash-src-rules.ps1 -StartIp 2 -Count 50 -AccountsPerIp 1 -Write
 
-# 10 nodes, five accounts per node
-powershell -ExecutionPolicy Bypass -File scripts\windows\clash-listeners.ps1 -StartPort 7911 -Count 10 -AccountsPerPort 5 -WriteMerge
+# 10 nodes, five accounts per node and per address
+powershell -ExecutionPolicy Bypass -File scripts\windows\clash-src-rules.ps1 -StartIp 2 -Count 10 -AccountsPerIp 5 -Write
 
-# keep only nodes that answer a probe, four accounts per node
-powershell -ExecutionPolicy Bypass -File scripts\windows\clash-listeners.ps1 -StartPort 7911 -Count 15 -AccountsPerPort 4 -HealthyOnly -WriteMerge
+# keep only nodes that answer a probe
+powershell -ExecutionPolicy Bypass -File scripts\windows\clash-src-rules.ps1 -StartIp 2 -Count 50 -HealthyOnly -Write
+
+# only Japan and Singapore nodes
+powershell -ExecutionPolicy Bypass -File scripts\windows\clash-src-rules.ps1 -StartIp 2 -Count 20 -NodePattern "Japan|Singapore" -Write
 ```
 
-In Clash Verge open the profile menu and click 重新激活订阅. Then check the ports.
+In Clash Verge open the profile page and click the flame icon at the top right, 重新激活订阅. Then check two source addresses.
 
 ```powershell
-Get-NetTCPConnection -State Listen | Where-Object LocalPort -ge 7911 | Sort-Object LocalPort
-curl.exe -x http://127.0.0.1:7911 https://api.ipify.org
-curl.exe -x http://127.0.0.1:7912 https://api.ipify.org
+curl.exe --interface 127.0.0.2 -x http://127.0.0.1:7897 https://api.ipify.org
+curl.exe --interface 127.0.0.3 -x http://127.0.0.1:7897 https://api.ipify.org
 ```
 
-Two different addresses prove that the listeners route to different nodes. A request to a dead port fails at once, which proves that the account client does not fall back to the system proxy.
+Two different addresses prove that one port routes to different nodes by source address.
 
 ### Assign proxies
 
-Desktop app. Set **每 IP 账号** before adding accounts. The account dialog has a proxy field and pre-fills the next port according to that number. With 50 accounts and 15 healthy nodes, set 4. **设置代理** changes one account. **批量分配代理** assigns ports in account-name order. Enter the start port and the number of accounts per address. The assignment is written into the session files and takes effect on the next **启动**.
+Desktop app. Set **每 IP 账号** before adding accounts. The account dialog pre-fills the fixed proxy `http://127.0.0.1:7897`. **设置代理** changes one account and takes both the proxy and the source address. **批量分配代理** assigns source addresses in account-name order. Enter the first `127.0.0.x` octet, the shared port and the number of accounts per address. The assignment is written into the session files and takes effect on the next **启动**.
 
 CLI.
 
 ```powershell
-dragoman login --account acc01 --proxy http://127.0.0.1:7911 --profile-dir D:\chrome-profiles\acc01
+dragoman login --account acc01 --proxy http://127.0.0.1:7897 --profile-dir D:\chrome-profiles\acc01
 dragoman accounts
 dragoman serve --port 8080 --balance least-used
 ```
 
-`login --proxy` also starts Chrome with `--proxy-server`, so the sign-in request and later RPC calls leave from the same node.
+`login --proxy` also starts Chrome with `--proxy-server`, so the sign-in request and later RPC calls leave from the same port. Chrome itself uses the system source address, so pick the account node in Clash before signing in, or assign the source address first and set the Clash rule before the first RPC call.
 
 The management commands are available for scripts.
 
 ```powershell
-dragoman desktop-accounts assign-proxies --start-port=7911 --per-port=1
-dragoman desktop-accounts set-proxy --id=named:acc01 --proxy=http://127.0.0.1:7911
+dragoman desktop-accounts assign-proxies --start-ip=2 --proxy-port=7897 --per-ip=1
+dragoman desktop-accounts set-proxy --id=named:acc01 --proxy=http://127.0.0.1:7897 --local-ip=127.0.0.2
 dragoman desktop-accounts set-proxy --id=named:acc01 --proxy=
 ```
 
-`assign-proxies` orders accounts by name. `per-port=1` gives each account its own listener. `per-port=5` puts five consecutive accounts on one listener. `set-proxy` with an empty value clears the field and returns the account to the Windows system proxy.
+`assign-proxies` orders accounts by name. `--start-ip=2 --per-ip=1` gives account 1 `127.0.0.2`, account 2 `127.0.0.3` and so on, all through 7897. `--per-ip=5` puts five consecutive accounts on one source address and one node. `set-proxy` with an empty value clears the route and returns the account to the Windows system proxy.
 
 ### Why the client disables the system proxy
 
 `reqwest` reads the Windows proxy settings by default. A per-account client calls `no_proxy()` before it adds its own proxy, so one account does not inherit the registry proxy and does not share an address with the others.
+
+`local_address` binds the socket before the TCP connect, so the Clash listener sees the account address as the connection source. Windows accepts every address in `127.0.0.0/8` as a loopback source without adding it to a network adapter.
 
 ---
 

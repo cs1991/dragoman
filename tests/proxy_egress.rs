@@ -2,7 +2,7 @@ use dragoman::accounts::Account;
 use dragoman::session::SessionData;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-fn session(proxy: Option<String>) -> SessionData {
+fn session(proxy: Option<String>, local_ip: Option<String>) -> SessionData {
     SessionData {
         snlm0e: "at".to_string(),
         f_sid: "sid".to_string(),
@@ -14,6 +14,7 @@ fn session(proxy: Option<String>) -> SessionData {
         choice_id: None,
         base_url: None,
         proxy,
+        local_ip,
         path: None,
     }
 }
@@ -37,7 +38,10 @@ async fn account_proxy_carries_requests_through_the_listener() {
     });
 
     // A bare host:port is accepted and treated as an HTTP proxy.
-    let account = Account::new("proxied", session(Some(format!("127.0.0.1:{port}"))));
+    let account = Account::new(
+        "proxied",
+        session(Some(format!("127.0.0.1:{port}")), None),
+    );
     let response = account
         .http
         .get("http://example.test/ping")
@@ -55,7 +59,7 @@ async fn account_proxy_carries_requests_through_the_listener() {
 
 #[tokio::test]
 async fn account_without_proxy_keeps_a_working_client() {
-    let account = Account::new("direct", session(None));
+    let account = Account::new("direct", session(None, None));
     // The client builds without a proxy. Reaching the network is not part of
     // this check, so only construction and local request routing matter here.
     let request = account
@@ -64,4 +68,28 @@ async fn account_without_proxy_keeps_a_working_client() {
         .build()
         .expect("request should build");
     assert_eq!(request.url().host_str(), Some("127.0.0.1"));
+}
+
+/// `local_ip` must bind the socket, because that source address is what the
+/// Clash `SRC-IP-CIDR` rule matches when it picks an egress node.
+#[tokio::test]
+async fn account_local_ip_binds_the_source_address() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = tokio::spawn(async move {
+        let (socket, peer) = listener.accept().await.unwrap();
+        drop(socket);
+        peer.ip().to_string()
+    });
+
+    let account = Account::new("bound", session(None, Some("127.0.0.2".to_string())));
+    let _ = account
+        .http
+        .get(format!("http://127.0.0.1:{port}/source"))
+        .send()
+        .await;
+
+    let peer = server.await.unwrap();
+    assert_eq!(peer, "127.0.0.2");
 }

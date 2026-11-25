@@ -12,8 +12,16 @@ pub struct SavedAccount {
     enabled: bool,
     model: Option<String>,
     proxy: Option<String>,
+    local_ip: Option<String>,
     #[serde(skip)]
     path: PathBuf,
+}
+
+#[derive(Serialize)]
+pub struct ProxyAssignment {
+    pub name: String,
+    pub proxy: String,
+    pub local_ip: String,
 }
 
 pub struct AccountStore {
@@ -126,48 +134,77 @@ impl AccountStore {
             name,
             enabled,
             model: session.as_ref().map(|session| session.model.clone()),
-            proxy: session.and_then(|session| session.proxy),
+            proxy: session.as_ref().and_then(|session| session.proxy.clone()),
+            local_ip: session.and_then(|session| session.local_ip),
             path: path.to_path_buf(),
         }
     }
 
-    /// Set or clear the egress proxy of one saved account.
-    pub fn set_proxy(&self, id: &str, proxy: Option<&str>) -> Result<(), String> {
+    /// Set or clear the egress proxy and source address of one saved account.
+    pub fn set_route(
+        &self,
+        id: &str,
+        proxy: Option<&str>,
+        local_ip: Option<&str>,
+    ) -> Result<(), String> {
         let path = self.login_path(id)?;
         let mut session = SessionData::load_from(&path)?;
         session.proxy = proxy
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
+        session.local_ip = match local_ip
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => {
+                value
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| format!("Invalid source address: {value}"))?;
+                Some(value.to_string())
+            }
+            None => None,
+        };
         session.save()
     }
 
-    /// Spread all saved accounts over local Clash listeners.
+    /// Spread all saved accounts over loopback source addresses.
     ///
-    /// Accounts are ordered by name. `per_port` accounts share one listener,
-    /// which gives them the same public address. Returns the name and proxy of
-    /// every account that was written.
+    /// Accounts are ordered by name. `per_ip` accounts share one source
+    /// address, which gives them the same Clash node. Every account still uses
+    /// the single mixed port in `proxy_port`. Returns the name, proxy and source
+    /// address of every account that was written.
     pub fn assign_proxies(
         &self,
-        start_port: u16,
-        per_port: u16,
-    ) -> Result<Vec<(String, String)>, String> {
-        if per_port == 0 {
-            return Err("Accounts per port must be at least 1".into());
+        start_ip: u8,
+        proxy_port: u16,
+        per_ip: u16,
+    ) -> Result<Vec<ProxyAssignment>, String> {
+        if per_ip == 0 {
+            return Err("Accounts per address must be at least 1".into());
+        }
+        if start_ip == 0 || start_ip == 255 {
+            return Err("Start address must be between 1 and 254".into());
         }
         let mut accounts = self.list()?;
         accounts.sort_by(|a, b| a.name.cmp(&b.name).then(b.enabled.cmp(&a.enabled)));
         let mut assignments = Vec::with_capacity(accounts.len());
         for (index, account) in accounts.iter().enumerate() {
-            let offset = u32::from(start_port) + (index as u32 / u32::from(per_port));
-            if offset > u32::from(u16::MAX) {
-                return Err("Proxy port range exceeds 65535".into());
+            let offset = u32::from(start_ip) + (index as u32 / u32::from(per_ip));
+            if offset > 254 {
+                return Err("Source address range exceeds 127.0.0.254".into());
             }
-            let proxy = format!("http://127.0.0.1:{offset}");
+            let proxy = format!("http://127.0.0.1:{proxy_port}");
+            let local_ip = format!("127.0.0.{offset}");
             let mut session = SessionData::load_from(&account.path)?;
             session.proxy = Some(proxy.clone());
+            session.local_ip = Some(local_ip.clone());
             session.save()?;
-            assignments.push((account.name.clone(), proxy));
+            assignments.push(ProxyAssignment {
+                name: account.name.clone(),
+                proxy,
+                local_ip,
+            });
         }
         Ok(assignments)
     }

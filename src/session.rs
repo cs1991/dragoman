@@ -27,6 +27,13 @@ pub struct SessionData {
     /// share a public address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Optional local source address for this account, for example `127.0.0.7`.
+    ///
+    /// Every loopback address in `127.0.0.0/8` can be bound on Windows. Clash
+    /// Verge selects an egress node with `SRC-IP-CIDR`, so accounts can share
+    /// the fixed mixed port and still leave through different nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_ip: Option<String>,
     /// File this session was loaded from. Local machine data, never serialized.
     #[serde(skip)]
     pub path: Option<PathBuf>,

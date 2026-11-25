@@ -160,6 +160,7 @@ async fn test_multi_turn_session_chaining_simulation() {
         choice_id: None,
         base_url: None,
         proxy: None,
+        local_ip: None,
         path: None,
     };
 
@@ -269,6 +270,7 @@ fn test_session_serialization_backward_compatibility() {
         choice_id: Some("rc_001".to_string()),
         base_url: None,
         proxy: None,
+        local_ip: None,
         path: None,
     };
 

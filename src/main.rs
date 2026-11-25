@@ -101,12 +101,20 @@ enum AccountAction {
         /// Proxy URL. An empty value clears the proxy.
         #[arg(long)]
         proxy: Option<String>,
+        /// Local source address, for example 127.0.0.7. An empty value clears it.
+        #[arg(long)]
+        local_ip: Option<String>,
     },
     AssignProxies {
-        #[arg(long, default_value_t = 7911)]
-        start_port: u16,
+        /// First loopback host octet, so 2 means 127.0.0.2.
+        #[arg(long, default_value_t = 2)]
+        start_ip: u8,
+        /// Shared Clash Verge mixed port.
+        #[arg(long, default_value_t = 7897)]
+        proxy_port: u16,
+        /// Accounts that share one source address and one node.
         #[arg(long, default_value_t = 1)]
-        per_port: u16,
+        per_ip: u16,
     },
 }
 
@@ -328,15 +336,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AccountAction::Enable { id } => store.set_enabled(&id, true)?,
                 AccountAction::Disable { id } => store.set_enabled(&id, false)?,
                 AccountAction::Remove { id, disabled } => store.remove(&id, !disabled)?,
-                AccountAction::SetProxy { id, proxy } => {
-                    store.set_proxy(&id, proxy.as_deref())?;
+                AccountAction::SetProxy {
+                    id,
+                    proxy,
+                    local_ip,
+                } => {
+                    store.set_route(&id, proxy.as_deref(), local_ip.as_deref())?;
                     println!("{}", serde_json::to_string(&store.list()?)?);
                 }
                 AccountAction::AssignProxies {
-                    start_port,
-                    per_port,
+                    start_ip,
+                    proxy_port,
+                    per_ip,
                 } => {
-                    let assignments = store.assign_proxies(start_port, per_port)?;
+                    let assignments = store.assign_proxies(start_ip, proxy_port, per_ip)?;
                     println!("{}", serde_json::to_string(&assignments)?);
                 }
             }
@@ -355,15 +368,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Total served: {}", status.total_served);
             println!();
             println!(
-                "{:<20} {:<16} {:<22} {:>7} {:>6} {:>9}  LAST ERROR",
-                "NAME", "MODEL", "PROXY", "SERVED", "FAILS", "COOLDOWN"
+                "{:<20} {:<16} {:<22} {:<12} {:>7} {:>6} {:>9}  LAST ERROR",
+                "NAME", "MODEL", "PROXY", "LOCAL IP", "SERVED", "FAILS", "COOLDOWN"
             );
             for account in &status.accounts {
                 println!(
-                    "{:<20} {:<16} {:<22} {:>7} {:>6} {:>8}s  {}",
+                    "{:<20} {:<16} {:<22} {:<12} {:>7} {:>6} {:>8}s  {}",
                     account.name,
                     account.model,
                     account.proxy.as_deref().unwrap_or("-"),
+                    account.local_ip.as_deref().unwrap_or("-"),
                     account.served,
                     account.failures,
                     account.cooldown_seconds,
@@ -506,6 +520,7 @@ async fn capture_session(
         choice_id: None,
         base_url: None,
         proxy: None,
+        local_ip: None,
         path: Some(session_path),
     })
 }

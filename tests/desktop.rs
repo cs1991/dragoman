@@ -133,7 +133,7 @@ fn assign_proxies_groups_accounts_and_set_proxy_can_clear() {
     fixture.save("sessions/b.json");
     fixture.save("sessions/c.json");
 
-    let output = fixture.manage(&["assign-proxies", "--start-port=7911", "--per-port=2"]);
+    let output = fixture.manage(&["assign-proxies", "--start-ip=2", "--proxy-port=7897", "--per-ip=2"]);
     assert!(
         output.status.success(),
         "{}",
@@ -152,9 +152,21 @@ fn assign_proxies_groups_accounts_and_set_proxy_can_clear() {
             .and_then(|row| row["proxy"].as_str())
             .map(str::to_string)
     };
-    assert_eq!(proxy("a").as_deref(), Some("http://127.0.0.1:7911"));
-    assert_eq!(proxy("b").as_deref(), Some("http://127.0.0.1:7911"));
-    assert_eq!(proxy("c").as_deref(), Some("http://127.0.0.1:7912"));
+    let local_ip = |name: &str| {
+        entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .and_then(|row| row["local_ip"].as_str())
+            .map(str::to_string)
+    };
+    assert_eq!(proxy("a").as_deref(), Some("http://127.0.0.1:7897"));
+    assert_eq!(proxy("b").as_deref(), Some("http://127.0.0.1:7897"));
+    assert_eq!(proxy("c").as_deref(), Some("http://127.0.0.1:7897"));
+    assert_eq!(local_ip("a").as_deref(), Some("127.0.0.2"));
+    assert_eq!(local_ip("b").as_deref(), Some("127.0.0.2"));
+    assert_eq!(local_ip("c").as_deref(), Some("127.0.0.3"));
 
     assert!(
         fixture
@@ -176,6 +188,7 @@ fn assign_proxies_groups_accounts_and_set_proxy_can_clear() {
         .find(|row| row["name"] == "a")
         .unwrap();
     assert!(cleared["proxy"].is_null());
+    assert!(cleared["local_ip"].is_null());
 }
 
 #[test]

@@ -14,6 +14,7 @@ fn session(cookie: &str) -> SessionData {
         choice_id: None,
         base_url: None,
         proxy: None,
+        local_ip: None,
         path: None,
     }
 }

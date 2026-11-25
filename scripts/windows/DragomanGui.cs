@@ -19,6 +19,7 @@ internal sealed class DragomanGui : Form
         public bool enabled { get; set; }
         public string model { get; set; }
         public string proxy { get; set; }
+        public string local_ip { get; set; }
     }
 
     private readonly string executable = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "dragoman.exe");
@@ -222,7 +223,9 @@ internal sealed class DragomanGui : Form
             var row = new ListViewItem(account.name) { Tag = account };
             row.SubItems.Add((account.enabled ? "已启用" : "已停用") + (account.model == null ? " / 需登录" : ""));
             row.SubItems.Add(account.model ?? "—");
-            row.SubItems.Add(String.IsNullOrEmpty(account.proxy) ? "系统" : account.proxy);
+            var route = String.IsNullOrEmpty(account.proxy) ? "系统" : account.proxy;
+            if (!String.IsNullOrEmpty(account.local_ip)) route += "  @ " + account.local_ip;
+            row.SubItems.Add(route);
             accounts.Items.Add(row);
             row.Selected = previous != null && account.id == previous.id && account.enabled == previous.enabled;
         }
@@ -238,28 +241,7 @@ internal sealed class DragomanGui : Form
 
     private string NextProxy()
     {
-        int highest = 7910;
-        int onHighest = 0;
-        foreach (ListViewItem row in accounts.Items)
-        {
-            var account = (Account)row.Tag;
-            if (String.IsNullOrEmpty(account.proxy)) continue;
-            var match = Regex.Match(account.proxy, @"127\.0\.0\.1:(\d+)\s*$");
-            if (!match.Success) continue;
-            int value;
-            if (!Int32.TryParse(match.Groups[1].Value, out value)) continue;
-            if (value > highest)
-            {
-                highest = value;
-                onHighest = 1;
-            }
-            else if (value == highest)
-            {
-                onHighest++;
-            }
-        }
-        int next = highest == 7910 || onHighest >= share.Value ? highest + 1 : highest;
-        return "http://127.0.0.1:" + next;
+        return "http://127.0.0.1:7897";
     }
 
     private async Task AddAccount()
@@ -270,7 +252,7 @@ internal sealed class DragomanGui : Form
         {
             var prompt = new Label { Text = "账号别名（字母、数字、点、横线或下划线）", AutoSize = true, Location = new Point(12, 12) };
             var name = new TextBox { Bounds = new Rectangle(12, 40, 400, 28), MaxLength = 64 };
-            var proxyPrompt = new Label { Text = "出口代理，可留空。Clash Verge 混合端口示例 http://127.0.0.1:7911", AutoSize = true, Location = new Point(12, 78) };
+            var proxyPrompt = new Label { Text = "出口代理，固定填 Clash Verge 混合端口 http://127.0.0.1:7897", AutoSize = true, Location = new Point(12, 78) };
             var proxy = new TextBox { Bounds = new Rectangle(12, 106, 400, 28), MaxLength = 200, Text = NextProxy() };
             var ok = new Button { Text = "打开 Chrome", AutoSize = true, Location = new Point(12, 160) };
             ok.Click += (s, e) => {
@@ -294,52 +276,60 @@ internal sealed class DragomanGui : Form
     private async Task EditProxy()
     {
         var account = Selected;
-        using (var dialog = new Form { Text = "设置代理", ClientSize = new Size(430, 150), Font = Font,
+        using (var dialog = new Form { Text = "设置代理", ClientSize = new Size(430, 215), Font = Font,
             StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
         {
-            var prompt = new Label { Text = "出口代理。清空后该账号走系统代理。", AutoSize = true, Location = new Point(12, 12) };
+            var prompt = new Label { Text = "出口代理。固定 http://127.0.0.1:7897。", AutoSize = true, Location = new Point(12, 12) };
             var proxy = new TextBox { Bounds = new Rectangle(12, 40, 400, 28), MaxLength = 200, Text = account.proxy ?? "" };
-            var ok = new Button { Text = "保存", AutoSize = true, Location = new Point(12, 90) };
+            var ipPrompt = new Label { Text = "源地址。每个账号一个，如 127.0.0.7。", AutoSize = true, Location = new Point(12, 76) };
+            var localIp = new TextBox { Bounds = new Rectangle(12, 104, 400, 28), MaxLength = 40, Text = account.local_ip ?? "" };
+            var ok = new Button { Text = "保存", AutoSize = true, Location = new Point(12, 150) };
             ok.Click += (s, e) => {
                 var value = proxy.Text.Trim();
                 if (value.Length > 0 && !ValidProxy(value))
                     MessageBox.Show(dialog, "代理地址格式为 host:port 或 http://host:port。", "Dragoman");
                 else dialog.DialogResult = DialogResult.OK;
             };
-            dialog.Controls.AddRange(new Control[] { prompt, proxy, ok });
+            dialog.Controls.AddRange(new Control[] { prompt, proxy, ipPrompt, localIp, ok });
             dialog.AcceptButton = ok;
             if (dialog.ShowDialog(this) == DialogResult.OK)
             {
-                await Manage("set-proxy --id=" + AccountArg(account.id) + " --proxy=" + proxy.Text.Trim());
+                await Manage("set-proxy --id=" + AccountArg(account.id)
+                    + " --proxy=" + proxy.Text.Trim()
+                    + " --local-ip=" + localIp.Text.Trim());
                 await RefreshAccounts();
                 message.Text = proxy.Text.Trim().Length == 0
                     ? "已清空该账号的代理。"
-                    : "已保存该账号的代理，重启代理后生效。";
+                    : "已保存该账号的出口，重启代理后生效。";
             }
         }
     }
 
     private async Task AssignProxies()
     {
-        using (var dialog = new Form { Text = "批量分配代理", ClientSize = new Size(400, 200), Font = Font,
+        using (var dialog = new Form { Text = "批量分配代理", ClientSize = new Size(560, 230), Font = Font,
             StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
         {
-            var startPrompt = new Label { Text = "起始端口", AutoSize = true, Location = new Point(12, 12) };
-            var startPort = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = 7911, Bounds = new Rectangle(12, 40, 110, 28) };
+            var startPrompt = new Label { Text = "起始源地址 127.0.0.x", AutoSize = true, Location = new Point(12, 12) };
+            var startIp = new NumericUpDown { Minimum = 1, Maximum = 254, Value = 2, Bounds = new Rectangle(12, 40, 110, 28) };
             var sharePrompt = new Label { Text = "每个 IP 承载账号数", AutoSize = true, Location = new Point(150, 12) };
             var perPort = new NumericUpDown { Minimum = 1, Maximum = 100, Value = share.Value, Bounds = new Rectangle(150, 40, 110, 28) };
-            var note = new Label { Text = "账号按名称排序，第 1 到 N 个账号使用起始端口，之后端口加 1。", AutoSize = true, Location = new Point(12, 80) };
-            var ok = new Button { Text = "分配", AutoSize = true, Location = new Point(12, 120) };
+            var portPrompt = new Label { Text = "代理端口", AutoSize = true, Location = new Point(288, 12) };
+            var proxyPort = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = 7897, Bounds = new Rectangle(288, 40, 110, 28) };
+            var note = new Label { Text = "账号按名称排序，前 N 个账号使用起始源地址，之后加 1。全部走 Clash 的同一个混合端口，靠源 IP 选节点。", AutoSize = false, Bounds = new Rectangle(12, 90, 520, 36) };
+            var ok = new Button { Text = "分配", AutoSize = true, Location = new Point(12, 140) };
             ok.Click += (s, e) => dialog.DialogResult = DialogResult.OK;
-            dialog.Controls.AddRange(new Control[] { startPrompt, startPort, sharePrompt, perPort, note, ok });
+            dialog.Controls.AddRange(new Control[] { startPrompt, startIp, sharePrompt, perPort, portPrompt, proxyPort, note, ok });
             dialog.AcceptButton = ok;
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            await Manage("assign-proxies --start-port=" + startPort.Value + " --per-port=" + perPort.Value);
+            await Manage("assign-proxies --start-ip=" + startIp.Value
+                + " --proxy-port=" + proxyPort.Value
+                + " --per-ip=" + perPort.Value);
             share.Value = perPort.Value;
             await RefreshAccounts();
-            message.Text = "已分配代理。重启代理后生效。";
+            message.Text = "已分配源地址。重启代理后生效。";
         }
     }
 

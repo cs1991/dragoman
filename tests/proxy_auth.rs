@@ -18,6 +18,7 @@ async fn proxy_routes_do_not_require_or_check_an_api_key() {
         choice_id: None,
         base_url: None,
         proxy: None,
+        local_ip: None,
         path: None,
     });
     let state = Arc::new(AppState {

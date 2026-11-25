@@ -133,12 +133,13 @@ impl Account {
     }
 
     pub async fn status(&self) -> AccountStatus {
-        let (model, has_conversation, proxy) = {
+        let (model, has_conversation, proxy, local_ip) = {
             let session = self.session.lock().await;
             (
                 session.model.clone(),
                 session.conversation_id.is_some(),
                 session.proxy.as_deref().map(redact_proxy),
+                session.local_ip.clone(),
             )
         };
         let runtime = self.runtime();
@@ -152,6 +153,7 @@ impl Account {
             name: self.name.clone(),
             model,
             proxy,
+            local_ip,
             has_conversation,
             served: runtime.served,
             failures: runtime.failures,
@@ -166,6 +168,7 @@ pub struct AccountStatus {
     pub name: String,
     pub model: String,
     pub proxy: Option<String>,
+    pub local_ip: Option<String>,
     pub has_conversation: bool,
     pub served: u64,
     pub failures: u32,
@@ -437,13 +440,27 @@ fn truncate(value: &str, max_chars: usize) -> String {
 
 /// Build the per-account HTTP client.
 ///
-/// The client keeps the long read timeout that video analysis needs and adds a
-/// router proxy when the session names one. A bare `127.0.0.1:7901` is treated
-/// as an HTTP proxy, which is what a Clash Verge mixed listener speaks.
+/// The client keeps the long read timeout that video analysis needs, binds an
+/// optional local source address and adds a router proxy when the session names
+/// one. A bare `127.0.0.1:7897` is treated as an HTTP proxy, which is what a
+/// Clash Verge mixed listener speaks. Source address plus `SRC-IP-CIDR` rules
+/// gives every account its own node on one shared port.
 pub fn build_http_client(session: &SessionData) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .read_timeout(Duration::from_secs(900));
+
+    if let Some(raw) = session
+        .local_ip
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match raw.parse::<std::net::IpAddr>() {
+            Ok(address) => builder = builder.local_address(address),
+            Err(error) => tracing::warn!("Account local_ip {raw} was ignored: {error}"),
+        }
+    }
 
     if let Some(raw) = session
         .proxy
