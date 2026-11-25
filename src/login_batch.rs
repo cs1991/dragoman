@@ -774,7 +774,17 @@ async fn ensure_gemini_app(client: &CdpClient) -> Result<(), String> {
                     url: location.href,
                     text: ((document.body && document.body.innerText) || '').slice(0, 500),
                     app: !!document.querySelector('rich-textarea, [contenteditable="true"]'),
-                    snlm0e: (window.WIZ_global_data && window.WIZ_global_data.SNlM0e) || ''
+                    snlm0e: (window.WIZ_global_data && window.WIZ_global_data.SNlM0e) || '',
+                    onboarding: (() => {
+                        const visible = el => !!el && (el.offsetWidth > 0 || el.offsetHeight > 0);
+                        const controls = Array.from(document.querySelectorAll('button, [role="button"], a'));
+                        return controls.some(el => {
+                            if (!visible(el)) return false;
+                            const label = ((el.innerText || '') + ' ' + (el.getAttribute('aria-label') || '')).trim();
+                            return label.length > 0 && label.length <= 40
+                                && /use gemini|使用 gemini|chat with gemini/i.test(label);
+                        });
+                    })()
                 }))()"#,
             )
             .await?;
@@ -786,9 +796,10 @@ async fn ensure_gemini_app(client: &CdpClient) -> Result<(), String> {
             .get("snlm0e")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        if app && !token.is_empty() {
-            return Ok(());
-        }
+        let onboarding = state
+            .get("onboarding")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         if attempt == 0 || attempt == 6 || attempt == 12 {
             let text = state
                 .get("text")
@@ -801,6 +812,23 @@ async fn ensure_gemini_app(client: &CdpClient) -> Result<(), String> {
                 "  Gemini 状态：app={app} token={} text={text}",
                 !token.is_empty()
             );
+        }
+
+        // The first-run dialog sits above the composer. Its controls exist
+        // before the app is usable, so dismiss it even when the token is
+        // already present and keep the saved profile free of the dialog.
+        if onboarding && dismiss_gemini_onboarding(client).await {
+            println!("  关闭 Gemini 引导弹窗");
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            attempt = attempt.saturating_add(1);
+            if attempt > 12 {
+                return Ok(());
+            }
+            continue;
+        }
+
+        if app && !token.is_empty() {
+            return Ok(());
         }
 
         let clicked = click_texts(
@@ -829,6 +857,44 @@ async fn ensure_gemini_app(client: &CdpClient) -> Result<(), String> {
     }
     save_failure_shot(client, "gemini").await;
     Err("Gemini 页面没有进入可对话状态".to_string())
+}
+
+/// Click the continue control of the Gemini first-run dialog.
+///
+/// Only real controls are considered, and a long label is rejected so the
+/// dialog container is never clicked instead of its button.
+async fn dismiss_gemini_onboarding(client: &CdpClient) -> bool {
+    let script = r#"(() => {
+        const visible = el => !!el && (el.offsetWidth > 0 || el.offsetHeight > 0);
+        const wanted = ['use gemini', '使用 gemini', 'chat with gemini', '开始使用'];
+        const nodes = Array.from(document.querySelectorAll('button, [role="button"], a'));
+        for (const el of nodes) {
+            if (!visible(el)) continue;
+            const label = ((el.innerText || '') + ' ' + (el.getAttribute('aria-label') || '')).trim();
+            if (!label || label.length > 40) continue;
+            const lower = label.toLowerCase();
+            if (!wanted.some(w => lower === w || lower.includes(w))) continue;
+            el.scrollIntoView({ block: 'center', inline: 'center' });
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 8 || rect.height < 8) continue;
+            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        }
+        return null;
+    })()"#;
+    let value = match client.evaluate_js(script).await {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    match (
+        value.get("x").and_then(|value| value.as_f64()),
+        value.get("y").and_then(|value| value.as_f64()),
+    ) {
+        (Some(x), Some(y)) => {
+            mouse_click(client, x, y).await;
+            true
+        }
+        _ => false,
+    }
 }
 
 async fn capture_session(
