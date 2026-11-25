@@ -19,6 +19,14 @@ pub struct SessionData {
     /// dedicated egress proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Optional egress proxy for this account.
+    ///
+    /// A Clash Verge mixed listener is an HTTP proxy, so a value such as
+    /// `http://127.0.0.1:7901` sends every Gemini Web request for this account
+    /// through the node that listener is bound to. Accounts that share a port
+    /// share a public address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
     /// File this session was loaded from. Local machine data, never serialized.
     #[serde(skip)]
     pub path: Option<PathBuf>,

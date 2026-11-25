@@ -120,7 +120,85 @@ The script stops running CLI instances from `target/release` and `dist/dragoman-
 
 In the output folder, double-click `login.cmd` for first-time setup. Finish signing in to Gemini in Chrome. If `login.cmd` did not save a session on the first run, leave Chrome open and run it again. After it reports success, close that Chrome window and double-click `start.cmd`. The startup window shows the error if the proxy exits.
 
-Dragoman honors the Windows system proxy for its connection to Gemini. If Gemini opens in Chrome but Dragoman reports a connection error, check that the proxy is running and enabled in Windows Settings. A proxy set only inside Chrome does not apply to Dragoman. When starting Dragoman from a terminal, you can also set `HTTPS_PROXY` for that process.
+Dragoman uses the Windows system proxy when an account has no `proxy` field. If Gemini opens in Chrome but Dragoman reports a connection error, check that the proxy is running and enabled in Windows Settings. A proxy set only inside Chrome does not apply to Dragoman. When starting Dragoman from a terminal, you can also set `HTTPS_PROXY` for that process. A per-account proxy overrides both values. The next section describes the field.
+
+## Per-Account Egress Proxy
+
+Each saved session can carry its own egress proxy. Dragoman builds one HTTP client per account and sends both attachment uploads and `StreamGenerate` calls through that proxy. Gemini sees the address of the proxy node instead of the Windows system proxy. Accounts that name the same listener share one public address.
+
+The session field is `proxy`.
+
+```json
+{
+  "proxy": "http://127.0.0.1:7911"
+}
+```
+
+A bare `127.0.0.1:7911` is accepted. `dragoman accounts` prints the host and port in the PROXY column and hides any userinfo.
+
+### Clash Verge listeners
+
+Clash Verge exposes one mixed listener per node. Add `listeners` entries to the profile Merge file and reload the profile.
+
+```yaml
+listeners:
+  - name: dg-7911
+    type: mixed
+    port: 7911
+    listen: 127.0.0.1
+    proxy: "🇯🇵 Japan | 01"
+```
+
+`scripts\windows\clash-listeners.ps1` reads the running Clash controller and writes the block for you. It reads the controller secret from the Clash Verge `config.yaml` when `-Secret` is omitted.
+
+```powershell
+# 50 accounts, one node per account, ports 7911 to 7960
+powershell -ExecutionPolicy Bypass -File scripts\windows\clash-listeners.ps1 -StartPort 7911 -Count 50 -AccountsPerPort 1 -WriteMerge
+
+# 10 nodes, five accounts per node
+powershell -ExecutionPolicy Bypass -File scripts\windows\clash-listeners.ps1 -StartPort 7911 -Count 10 -AccountsPerPort 5 -WriteMerge
+
+# keep only nodes that answer a probe, four accounts per node
+powershell -ExecutionPolicy Bypass -File scripts\windows\clash-listeners.ps1 -StartPort 7911 -Count 15 -AccountsPerPort 4 -HealthyOnly -WriteMerge
+```
+
+In Clash Verge open the profile menu and click 重新激活订阅. Then check the ports.
+
+```powershell
+Get-NetTCPConnection -State Listen | Where-Object LocalPort -ge 7911 | Sort-Object LocalPort
+curl.exe -x http://127.0.0.1:7911 https://api.ipify.org
+curl.exe -x http://127.0.0.1:7912 https://api.ipify.org
+```
+
+Two different addresses prove that the listeners route to different nodes. A request to a dead port fails at once, which proves that the account client does not fall back to the system proxy.
+
+### Assign proxies
+
+Desktop app. Set **每 IP 账号** before adding accounts. The account dialog has a proxy field and pre-fills the next port according to that number. With 50 accounts and 15 healthy nodes, set 4. **设置代理** changes one account. **批量分配代理** assigns ports in account-name order. Enter the start port and the number of accounts per address. The assignment is written into the session files and takes effect on the next **启动**.
+
+CLI.
+
+```powershell
+dragoman login --account acc01 --proxy http://127.0.0.1:7911 --profile-dir D:\chrome-profiles\acc01
+dragoman accounts
+dragoman serve --port 8080 --balance least-used
+```
+
+`login --proxy` also starts Chrome with `--proxy-server`, so the sign-in request and later RPC calls leave from the same node.
+
+The management commands are available for scripts.
+
+```powershell
+dragoman desktop-accounts assign-proxies --start-port=7911 --per-port=1
+dragoman desktop-accounts set-proxy --id=named:acc01 --proxy=http://127.0.0.1:7911
+dragoman desktop-accounts set-proxy --id=named:acc01 --proxy=
+```
+
+`assign-proxies` orders accounts by name. `per-port=1` gives each account its own listener. `per-port=5` puts five consecutive accounts on one listener. `set-proxy` with an empty value clears the field and returns the account to the Windows system proxy.
+
+### Why the client disables the system proxy
+
+`reqwest` reads the Windows proxy settings by default. A per-account client calls `no_proxy()` before it adds its own proxy, so one account does not inherit the registry proxy and does not share an address with the others.
 
 ---
 

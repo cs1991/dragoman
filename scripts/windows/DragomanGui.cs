@@ -18,6 +18,7 @@ internal sealed class DragomanGui : Form
         public string name { get; set; }
         public bool enabled { get; set; }
         public string model { get; set; }
+        public string proxy { get; set; }
     }
 
     private readonly string executable = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "dragoman.exe");
@@ -25,8 +26,9 @@ internal sealed class DragomanGui : Form
     private readonly Label status = new Label { AutoSize = true };
     private readonly Label message = new Label { Dock = DockStyle.Fill, AutoEllipsis = true };
     private readonly NumericUpDown port = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = 8080, Width = 78 };
+    private readonly NumericUpDown share = new NumericUpDown { Minimum = 1, Maximum = 100, Value = 1, Width = 52 };
     private readonly ComboBox strategy = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
-    private readonly Button start, stop, copy, add, loginAgain, toggle, remove, refresh, cancelLogin;
+    private readonly Button start, stop, copy, add, loginAgain, toggle, remove, setProxy, bulkProxy, refresh, cancelLogin;
     private Process server, login;
     private bool busy, ready, closing, stopping, loginCanceled;
     private Account Selected { get { return accounts.SelectedItems.Count == 0 ? null : (Account)accounts.SelectedItems[0].Tag; } }
@@ -54,8 +56,8 @@ internal sealed class DragomanGui : Form
         Text = "Dragoman";
         Font = new Font("Microsoft YaHei UI", 10);
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(810, 470);
-        MinimumSize = new Size(760, 400);
+        ClientSize = new Size(880, 470);
+        MinimumSize = new Size(820, 400);
 
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(16), ColumnCount = 1, RowCount = 6 };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -74,6 +76,8 @@ internal sealed class DragomanGui : Form
         strategy.Items.AddRange(new object[] { "轮询", "最少使用" });
         strategy.SelectedIndex = 0;
         serverBar.Controls.Add(strategy);
+        serverBar.Controls.Add(Caption("每 IP 账号"));
+        serverBar.Controls.Add(share);
         start = Button(serverBar, "启动", async () => await Run(StartProxy));
         stop = Button(serverBar, "停止", async () => await Run(StopProxy));
         copy = Button(serverBar, "复制 API 地址", CopyEndpoint);
@@ -86,14 +90,17 @@ internal sealed class DragomanGui : Form
         accounts.FullRowSelect = true;
         accounts.MultiSelect = false;
         accounts.HideSelection = false;
-        accounts.Columns.Add("账号", 275);
-        accounts.Columns.Add("状态", 150);
-        accounts.Columns.Add("模型", 190);
+        accounts.Columns.Add("账号", 210);
+        accounts.Columns.Add("状态", 130);
+        accounts.Columns.Add("模型", 150);
+        accounts.Columns.Add("代理", 300);
         accounts.SelectedIndexChanged += (s, e) => UpdateButtons();
         layout.Controls.Add(accounts, 0, 3);
         var accountBar = Bar(layout, 4);
         add = Button(accountBar, "新增账号", async () => await Run(AddAccount));
-        loginAgain = Button(accountBar, "重新登录", async () => await Run(() => LogIn(Selected.id)));
+        loginAgain = Button(accountBar, "重新登录", async () => await Run(() => LogIn(Selected.id, Selected.proxy)));
+        setProxy = Button(accountBar, "设置代理", async () => await Run(EditProxy));
+        bulkProxy = Button(accountBar, "批量分配代理", async () => await Run(AssignProxies));
         toggle = Button(accountBar, "停用", async () => await Run(ToggleAccount));
         remove = Button(accountBar, "删除", async () => await Run(RemoveAccount));
         refresh = Button(accountBar, "刷新列表", async () => await Run(RefreshAccounts));
@@ -129,8 +136,9 @@ internal sealed class DragomanGui : Form
     {
         var selected = Selected;
         bool edit = !busy && server == null && !closing;
-        add.Enabled = port.Enabled = strategy.Enabled = edit;
-        remove.Enabled = toggle.Enabled = loginAgain.Enabled = edit && selected != null;
+        add.Enabled = port.Enabled = strategy.Enabled = share.Enabled = edit;
+        remove.Enabled = toggle.Enabled = loginAgain.Enabled = setProxy.Enabled = edit && selected != null;
+        bulkProxy.Enabled = edit;
         toggle.Text = selected != null && !selected.enabled ? "启用" : "停用";
         start.Enabled = edit;
         stop.Enabled = server != null && !busy && !closing;
@@ -214,21 +222,57 @@ internal sealed class DragomanGui : Form
             var row = new ListViewItem(account.name) { Tag = account };
             row.SubItems.Add((account.enabled ? "已启用" : "已停用") + (account.model == null ? " / 需登录" : ""));
             row.SubItems.Add(account.model ?? "—");
+            row.SubItems.Add(String.IsNullOrEmpty(account.proxy) ? "系统" : account.proxy);
             accounts.Items.Add(row);
             row.Selected = previous != null && account.id == previous.id && account.enabled == previous.enabled;
         }
         accounts.EndUpdate();
     }
 
+    private static bool ValidProxy(string value)
+    {
+        return Regex.IsMatch(value,
+            @"\A(?:https?://)?(?:[^@\s/]+@)?[A-Za-z0-9._-]+:\d{1,5}\z",
+            RegexOptions.IgnoreCase);
+    }
+
+    private string NextProxy()
+    {
+        int highest = 7910;
+        int onHighest = 0;
+        foreach (ListViewItem row in accounts.Items)
+        {
+            var account = (Account)row.Tag;
+            if (String.IsNullOrEmpty(account.proxy)) continue;
+            var match = Regex.Match(account.proxy, @"127\.0\.0\.1:(\d+)\s*$");
+            if (!match.Success) continue;
+            int value;
+            if (!Int32.TryParse(match.Groups[1].Value, out value)) continue;
+            if (value > highest)
+            {
+                highest = value;
+                onHighest = 1;
+            }
+            else if (value == highest)
+            {
+                onHighest++;
+            }
+        }
+        int next = highest == 7910 || onHighest >= share.Value ? highest + 1 : highest;
+        return "http://127.0.0.1:" + next;
+    }
+
     private async Task AddAccount()
     {
-        using (var dialog = new Form { Text = "新增账号", ClientSize = new Size(375, 135), Font = Font,
+        using (var dialog = new Form { Text = "新增账号", ClientSize = new Size(430, 215), Font = Font,
             StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
             MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
         {
             var prompt = new Label { Text = "账号别名（字母、数字、点、横线或下划线）", AutoSize = true, Location = new Point(12, 12) };
-            var name = new TextBox { Bounds = new Rectangle(12, 42, 350, 28), MaxLength = 64 };
-            var ok = new Button { Text = "打开 Chrome", AutoSize = true, Location = new Point(12, 86) };
+            var name = new TextBox { Bounds = new Rectangle(12, 40, 400, 28), MaxLength = 64 };
+            var proxyPrompt = new Label { Text = "出口代理，可留空。Clash Verge 混合端口示例 http://127.0.0.1:7911", AutoSize = true, Location = new Point(12, 78) };
+            var proxy = new TextBox { Bounds = new Rectangle(12, 106, 400, 28), MaxLength = 200, Text = NextProxy() };
+            var ok = new Button { Text = "打开 Chrome", AutoSize = true, Location = new Point(12, 160) };
             ok.Click += (s, e) => {
                 var value = name.Text.Trim();
                 if (!Regex.IsMatch(value, @"\A[a-zA-Z0-9_-][a-zA-Z0-9._-]*\z"))
@@ -236,18 +280,79 @@ internal sealed class DragomanGui : Form
                 else if (accounts.Items.Cast<ListViewItem>().Any(row =>
                     String.Equals(((Account)row.Tag).id, "named:" + value, StringComparison.OrdinalIgnoreCase)))
                     MessageBox.Show(dialog, "此别名已存在。请选择该账号并重新登录。", "Dragoman");
+                else if (proxy.Text.Trim().Length > 0 && !ValidProxy(proxy.Text.Trim()))
+                    MessageBox.Show(dialog, "代理地址格式为 host:port 或 http://host:port。", "Dragoman");
                 else dialog.DialogResult = DialogResult.OK;
             };
-            dialog.Controls.AddRange(new Control[] { prompt, name, ok });
+            dialog.Controls.AddRange(new Control[] { prompt, name, proxyPrompt, proxy, ok });
             dialog.AcceptButton = ok;
-            if (dialog.ShowDialog(this) == DialogResult.OK) await LogIn("named:" + name.Text.Trim());
+            if (dialog.ShowDialog(this) == DialogResult.OK)
+                await LogIn("named:" + name.Text.Trim(), proxy.Text.Trim());
         }
     }
 
-    private async Task LogIn(string id)
+    private async Task EditProxy()
+    {
+        var account = Selected;
+        using (var dialog = new Form { Text = "设置代理", ClientSize = new Size(430, 150), Font = Font,
+            StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
+        {
+            var prompt = new Label { Text = "出口代理。清空后该账号走系统代理。", AutoSize = true, Location = new Point(12, 12) };
+            var proxy = new TextBox { Bounds = new Rectangle(12, 40, 400, 28), MaxLength = 200, Text = account.proxy ?? "" };
+            var ok = new Button { Text = "保存", AutoSize = true, Location = new Point(12, 90) };
+            ok.Click += (s, e) => {
+                var value = proxy.Text.Trim();
+                if (value.Length > 0 && !ValidProxy(value))
+                    MessageBox.Show(dialog, "代理地址格式为 host:port 或 http://host:port。", "Dragoman");
+                else dialog.DialogResult = DialogResult.OK;
+            };
+            dialog.Controls.AddRange(new Control[] { prompt, proxy, ok });
+            dialog.AcceptButton = ok;
+            if (dialog.ShowDialog(this) == DialogResult.OK)
+            {
+                await Manage("set-proxy --id=" + AccountArg(account.id) + " --proxy=" + proxy.Text.Trim());
+                await RefreshAccounts();
+                message.Text = proxy.Text.Trim().Length == 0
+                    ? "已清空该账号的代理。"
+                    : "已保存该账号的代理，重启代理后生效。";
+            }
+        }
+    }
+
+    private async Task AssignProxies()
+    {
+        using (var dialog = new Form { Text = "批量分配代理", ClientSize = new Size(400, 200), Font = Font,
+            StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false })
+        {
+            var startPrompt = new Label { Text = "起始端口", AutoSize = true, Location = new Point(12, 12) };
+            var startPort = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = 7911, Bounds = new Rectangle(12, 40, 110, 28) };
+            var sharePrompt = new Label { Text = "每个 IP 承载账号数", AutoSize = true, Location = new Point(150, 12) };
+            var perPort = new NumericUpDown { Minimum = 1, Maximum = 100, Value = share.Value, Bounds = new Rectangle(150, 40, 110, 28) };
+            var note = new Label { Text = "账号按名称排序，第 1 到 N 个账号使用起始端口，之后端口加 1。", AutoSize = true, Location = new Point(12, 80) };
+            var ok = new Button { Text = "分配", AutoSize = true, Location = new Point(12, 120) };
+            ok.Click += (s, e) => dialog.DialogResult = DialogResult.OK;
+            dialog.Controls.AddRange(new Control[] { startPrompt, startPort, sharePrompt, perPort, note, ok });
+            dialog.AcceptButton = ok;
+            if (dialog.ShowDialog(this) != DialogResult.OK) return;
+            await Manage("assign-proxies --start-port=" + startPort.Value + " --per-port=" + perPort.Value);
+            share.Value = perPort.Value;
+            await RefreshAccounts();
+            message.Text = "已分配代理。重启代理后生效。";
+        }
+    }
+
+    private async Task LogIn(string id, string proxy)
     {
         loginCanceled = false;
-        login = Spawn("login --desktop-id=" + AccountArg(id));
+        var arguments = "login --desktop-id=" + AccountArg(id);
+        if (!String.IsNullOrEmpty(proxy))
+        {
+            if (!ValidProxy(proxy)) throw new InvalidOperationException("代理地址格式为 host:port 或 http://host:port。");
+            arguments += " --proxy=" + proxy;
+        }
+        login = Spawn(arguments);
         message.Text = "请在 Chrome 中完成登录并打开 Gemini。已有同账号的 Chrome 窗口时，请关闭后重试。";
         UpdateButtons();
         try

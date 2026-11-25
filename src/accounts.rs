@@ -71,14 +71,20 @@ struct AccountRuntime {
 pub struct Account {
     pub name: String,
     pub session: Arc<Mutex<SessionData>>,
+    /// HTTP client for this account. It carries the account proxy when one is
+    /// configured, so uploads and StreamGenerate calls leave from the same
+    /// address.
+    pub http: reqwest::Client,
     turn: Arc<Mutex<()>>,
     runtime: StdMutex<AccountRuntime>,
 }
 
 impl Account {
     pub fn new(name: impl Into<String>, session: SessionData) -> Self {
+        let http = build_http_client(&session);
         Self {
             name: name.into(),
+            http,
             session: Arc::new(Mutex::new(session)),
             turn: Arc::new(Mutex::new(())),
             runtime: StdMutex::new(AccountRuntime::default()),
@@ -127,9 +133,13 @@ impl Account {
     }
 
     pub async fn status(&self) -> AccountStatus {
-        let (model, has_conversation) = {
+        let (model, has_conversation, proxy) = {
             let session = self.session.lock().await;
-            (session.model.clone(), session.conversation_id.is_some())
+            (
+                session.model.clone(),
+                session.conversation_id.is_some(),
+                session.proxy.as_deref().map(redact_proxy),
+            )
         };
         let runtime = self.runtime();
         let cooldown_seconds = runtime
@@ -141,6 +151,7 @@ impl Account {
         AccountStatus {
             name: self.name.clone(),
             model,
+            proxy,
             has_conversation,
             served: runtime.served,
             failures: runtime.failures,
@@ -154,6 +165,7 @@ impl Account {
 pub struct AccountStatus {
     pub name: String,
     pub model: String,
+    pub proxy: Option<String>,
     pub has_conversation: bool,
     pub served: u64,
     pub failures: u32,
@@ -421,4 +433,61 @@ fn truncate(value: &str, max_chars: usize) -> String {
         result.push_str("...");
     }
     result
+}
+
+/// Build the per-account HTTP client.
+///
+/// The client keeps the long read timeout that video analysis needs and adds a
+/// router proxy when the session names one. A bare `127.0.0.1:7901` is treated
+/// as an HTTP proxy, which is what a Clash Verge mixed listener speaks.
+pub fn build_http_client(session: &SessionData) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(900));
+
+    if let Some(raw) = session
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let url = normalize_proxy_url(raw);
+        match reqwest::Proxy::all(&url) {
+            // Disable the system proxy for this account. Without this the
+            // Windows registry proxy wins and every account leaves from the
+            // same address, which defeats the per-account listener.
+            Ok(proxy) => builder = builder.no_proxy().proxy(proxy),
+            Err(error) => {
+                tracing::warn!("Account proxy {raw} was ignored: {error}");
+            }
+        }
+    }
+
+    builder.build().unwrap_or_default()
+}
+
+fn normalize_proxy_url(raw: &str) -> String {
+    if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    }
+}
+
+/// Show `host:port` for status output, so a proxy password never reaches logs.
+pub fn redact_proxy(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host_part = without_scheme
+        .split_once('@')
+        .map(|(_, rest)| rest)
+        .unwrap_or(without_scheme);
+    host_part
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(host_part)
+        .to_string()
 }

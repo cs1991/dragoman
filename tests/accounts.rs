@@ -13,6 +13,7 @@ fn session(cookie: &str) -> SessionData {
         response_id: None,
         choice_id: None,
         base_url: None,
+        proxy: None,
         path: None,
     }
 }

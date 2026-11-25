@@ -28,7 +28,6 @@ pub struct StreamChunkPayload {
 
 pub struct GeminiWebClient {
     pool: Arc<AccountPool>,
-    http: reqwest::Client,
 }
 
 struct StreamAttempt {
@@ -117,16 +116,7 @@ impl GeminiWebClient {
     }
 
     pub fn with_pool(pool: Arc<AccountPool>) -> Self {
-        let http = reqwest::Client::builder()
-            // StreamGenerate can stay silent while Gemini analyzes a video.
-            // A total-request timeout aborts healthy long-running generations,
-            // so bound only connection setup and stalled reads.
-            .connect_timeout(Duration::from_secs(30))
-            .read_timeout(Duration::from_secs(900))
-            .build()
-            .unwrap_or_default();
-
-        Self { pool, http }
+        Self { pool }
     }
 
     pub fn pool(&self) -> Arc<AccountPool> {
@@ -441,8 +431,13 @@ impl GeminiWebClient {
             if !media.is_empty() {
                 let cookie = account.session.lock().await.cookie.clone();
                 for attachment in media {
-                    match upload_attachment(&self.http, &cookie, attachment, max_attachment_bytes)
-                        .await
+                    match upload_attachment(
+                        &account.http,
+                        &cookie,
+                        attachment,
+                        max_attachment_bytes,
+                    )
+                    .await
                     {
                         Ok(file) => {
                             info!("[{}] Uploaded attachment: {}", account.name, file.name);
@@ -695,7 +690,7 @@ impl GeminiWebClient {
             account.name, model.label
         );
 
-        let response = match self
+        let response = match account
             .http
             .post(&url)
             .headers(headers)
@@ -879,7 +874,7 @@ impl GeminiWebClient {
             ));
         };
         let cookie = account.session.lock().await.cookie.clone();
-        upload_attachment(&self.http, &cookie, media, max_bytes).await
+        upload_attachment(&account.http, &cookie, media, max_bytes).await
     }
 
     async fn process_stream_line(
@@ -944,7 +939,8 @@ mod tests {
 
     #[test]
     fn candidate_frame_is_not_parked() {
-        let line = r#"[["wrb.fr",null,"[null,[\"c_1\",\"r_1\"],null,null,[[\"rc_1\",[\"PING\"]]]]"]]"#;
+        let line =
+            r#"[["wrb.fr",null,"[null,[\"c_1\",\"r_1\"],null,null,[[\"rc_1\",[\"PING\"]]]]"]]"#;
         let parsed = super::GeminiWebClient::parse_wrb_fr_line(line).expect("candidate frame");
         assert!(!parsed.parked);
         assert_eq!(parsed.candidate_text.as_deref(), Some("PING"));

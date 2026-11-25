@@ -127,6 +127,58 @@ fn manage_named_and_legacy_accounts_without_exposing_credentials() {
 }
 
 #[test]
+fn assign_proxies_groups_accounts_and_set_proxy_can_clear() {
+    let fixture = Fixture::new();
+    fixture.save("sessions/a.json");
+    fixture.save("sessions/b.json");
+    fixture.save("sessions/c.json");
+
+    let output = fixture.manage(&["assign-proxies", "--start-port=7911", "--per-port=2"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let assignments: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(assignments.as_array().unwrap().len(), 3);
+
+    let entries = fixture.list();
+    let proxy = |name: &str| {
+        entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .and_then(|row| row["proxy"].as_str())
+            .map(str::to_string)
+    };
+    assert_eq!(proxy("a").as_deref(), Some("http://127.0.0.1:7911"));
+    assert_eq!(proxy("b").as_deref(), Some("http://127.0.0.1:7911"));
+    assert_eq!(proxy("c").as_deref(), Some("http://127.0.0.1:7912"));
+
+    assert!(
+        fixture
+            .manage(&["set-proxy", "--id=named:a", "--proxy=http://127.0.0.1:7999"])
+            .status
+            .success()
+    );
+    assert!(
+        fixture
+            .manage(&["set-proxy", "--id=named:a", "--proxy="])
+            .status
+            .success()
+    );
+    let entries = fixture.list();
+    let cleared = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "a")
+        .unwrap();
+    assert!(cleared["proxy"].is_null());
+}
+
+#[test]
 fn desktop_proxy_skips_disabled_sessions_and_stops_on_stdin_close() {
     let fixture = Fixture::new();
     fixture.save("sessions/disabled.json.disabled");

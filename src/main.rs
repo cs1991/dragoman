@@ -57,6 +57,10 @@ enum Commands {
         #[arg(long)]
         profile_dir: Option<std::path::PathBuf>,
 
+        /// Egress proxy for this account, for example http://127.0.0.1:7901
+        #[arg(long)]
+        proxy: Option<String>,
+
         #[arg(long, hide = true)]
         desktop_id: Option<String>,
     },
@@ -90,6 +94,19 @@ enum AccountAction {
         id: String,
         #[arg(long)]
         disabled: bool,
+    },
+    SetProxy {
+        #[arg(long)]
+        id: String,
+        /// Proxy URL. An empty value clears the proxy.
+        #[arg(long)]
+        proxy: Option<String>,
+    },
+    AssignProxies {
+        #[arg(long, default_value_t = 7911)]
+        start_port: u16,
+        #[arg(long, default_value_t = 1)]
+        per_port: u16,
     },
 }
 
@@ -191,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cdp_port,
             account,
             profile_dir,
+            proxy,
             desktop_id,
         } => {
             if let Some(id) = desktop_id {
@@ -209,9 +227,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if had_session {
                     println!("Found an existing Google session, reading it...");
-                    let (port, chrome) = BrowserLauncher::start_desktop_login(profile.clone())
-                        .await
-                        .map_err(|_| launch_error)?;
+                    let (port, chrome) =
+                        BrowserLauncher::start_desktop_login(profile.clone(), proxy.as_deref())
+                            .await
+                            .map_err(|_| launch_error)?;
                     session = capture_with_timeout(port, path.clone(), 30).await;
                     if session.is_some() {
                         capture_chrome = Some(chrome);
@@ -223,8 +242,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if session.is_none() {
                     println!("Open Chrome, sign in to Google and open Gemini...");
-                    let mut chrome = BrowserLauncher::spawn_plain_login(profile.clone())
-                        .map_err(|_| launch_error)?;
+                    let mut chrome =
+                        BrowserLauncher::spawn_plain_login(profile.clone(), proxy.as_deref())
+                            .map_err(|_| launch_error)?;
                     let wait_seconds = if had_session { 180 } else { 240 };
                     let deadline =
                         std::time::Instant::now() + std::time::Duration::from_secs(wait_seconds);
@@ -244,20 +264,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     BrowserLauncher::close_login_browser(chrome).await;
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-                    let (port, chrome) = BrowserLauncher::start_desktop_login(profile)
-                        .await
-                        .map_err(|_| launch_error)?;
+                    let (port, chrome) =
+                        BrowserLauncher::start_desktop_login(profile, proxy.as_deref())
+                            .await
+                            .map_err(|_| launch_error)?;
                     session = capture_with_timeout(port, path.clone(), 60).await;
                     capture_chrome = Some(chrome);
                 }
 
-                let Some(session) = session else {
+                let Some(mut session) = session else {
                     if let Some(chrome) = capture_chrome {
                         BrowserLauncher::close_login_browser(chrome).await;
                     }
                     return Err("读取会话失败。请重新登录，并在 Gemini 页面加载完成后重试。".into());
                 };
 
+                if let Some(value) = proxy.filter(|value| !value.trim().is_empty()) {
+                    session.proxy = Some(value);
+                }
                 session
                     .save()
                     .map_err(|_| "保存会话失败。请检查配置目录权限。")?;
@@ -281,11 +305,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cdp_port
             );
 
-            BrowserLauncher::ensure_chrome_running(cdp_port, profile_dir)
+            BrowserLauncher::ensure_chrome_running(cdp_port, profile_dir, proxy.as_deref())
                 .await
                 .map_err(|e| format!("Failed to launch browser: {}", e))?;
 
-            let session = capture_session(cdp_port, session_path.clone(), false).await?;
+            let mut session = capture_session(cdp_port, session_path.clone(), false).await?;
+            if let Some(value) = proxy.filter(|value| !value.trim().is_empty()) {
+                session.proxy = Some(value);
+            }
             session.save()?;
             println!(
                 "\nSUCCESS: Saved authentication session to {}",
@@ -301,6 +328,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AccountAction::Enable { id } => store.set_enabled(&id, true)?,
                 AccountAction::Disable { id } => store.set_enabled(&id, false)?,
                 AccountAction::Remove { id, disabled } => store.remove(&id, !disabled)?,
+                AccountAction::SetProxy { id, proxy } => {
+                    store.set_proxy(&id, proxy.as_deref())?;
+                    println!("{}", serde_json::to_string(&store.list()?)?);
+                }
+                AccountAction::AssignProxies {
+                    start_port,
+                    per_port,
+                } => {
+                    let assignments = store.assign_proxies(start_port, per_port)?;
+                    println!("{}", serde_json::to_string(&assignments)?);
+                }
             }
         }
         Commands::Accounts => {
@@ -317,14 +355,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Total served: {}", status.total_served);
             println!();
             println!(
-                "{:<20} {:<16} {:>7} {:>6} {:>9}  LAST ERROR",
-                "NAME", "MODEL", "SERVED", "FAILS", "COOLDOWN"
+                "{:<20} {:<16} {:<22} {:>7} {:>6} {:>9}  LAST ERROR",
+                "NAME", "MODEL", "PROXY", "SERVED", "FAILS", "COOLDOWN"
             );
             for account in &status.accounts {
                 println!(
-                    "{:<20} {:<16} {:>7} {:>6} {:>8}s  {}",
+                    "{:<20} {:<16} {:<22} {:>7} {:>6} {:>8}s  {}",
                     account.name,
                     account.model,
+                    account.proxy.as_deref().unwrap_or("-"),
                     account.served,
                     account.failures,
                     account.cooldown_seconds,
@@ -466,6 +505,7 @@ async fn capture_session(
         response_id: None,
         choice_id: None,
         base_url: None,
+        proxy: None,
         path: Some(session_path),
     })
 }

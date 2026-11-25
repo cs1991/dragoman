@@ -10,16 +10,22 @@ impl BrowserLauncher {
     /// sign-in when the browser runs with remote debugging, so the desktop
     /// login signs in here and only starts a debug build after the account
     /// cookies exist.
-    pub fn spawn_plain_login(data_dir: PathBuf) -> Result<std::process::Child, String> {
+    pub fn spawn_plain_login(
+        data_dir: PathBuf,
+        proxy: Option<&str>,
+    ) -> Result<std::process::Child, String> {
         std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
         let user_data_flag = format!("--user-data-dir={}", data_dir.display());
-        Self::spawn_native_chrome(&[
-            "--no-first-run",
-            "--no-default-browser-check",
-            &user_data_flag,
-            "https://gemini.google.com/app",
-        ])
-        .map_err(|error| error.to_string())
+        let args = chrome_args(
+            &[
+                "--no-first-run",
+                "--no-default-browser-check",
+                &user_data_flag,
+                "https://gemini.google.com/app",
+            ],
+            proxy,
+        );
+        Self::spawn_native_chrome(&args).map_err(|error| error.to_string())
     }
 
     /// Close the Chrome instance started for sign-in. A graceful taskkill lets
@@ -70,20 +76,24 @@ impl BrowserLauncher {
     /// to a pre-existing browser for a desktop login.
     pub async fn start_desktop_login(
         data_dir: PathBuf,
+        proxy: Option<&str>,
     ) -> Result<(u16, std::process::Child), String> {
         std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
         let port_file = data_dir.join("DevToolsActivePort");
         let previous = std::fs::read_to_string(&port_file).ok();
         let port_flag = "--remote-debugging-port=0".to_string();
         let user_data_flag = format!("--user-data-dir={}", data_dir.display());
-        let mut chrome = Self::spawn_native_chrome(&[
-            "--no-first-run",
-            "--no-default-browser-check",
-            &port_flag,
-            &user_data_flag,
-            "https://gemini.google.com/app",
-        ])
-        .map_err(|error| error.to_string())?;
+        let args = chrome_args(
+            &[
+                "--no-first-run",
+                "--no-default-browser-check",
+                &port_flag,
+                &user_data_flag,
+                "https://gemini.google.com/app",
+            ],
+            proxy,
+        );
+        let mut chrome = Self::spawn_native_chrome(&args).map_err(|error| error.to_string())?;
 
         for _ in 0..60 {
             if chrome
@@ -108,6 +118,7 @@ impl BrowserLauncher {
     pub async fn ensure_chrome_running(
         port: u16,
         profile_dir: Option<PathBuf>,
+        proxy: Option<&str>,
     ) -> Result<String, String> {
         if Self::is_cdp_ready(port).await {
             info!("Chrome CDP is already listening on port {}", port);
@@ -137,37 +148,48 @@ impl BrowserLauncher {
         let launched = if let Ok(status) = flatpak_status {
             if status.success() {
                 info!("Launching Flatpak Google Chrome (com.google.Chrome)...");
-                Command::new("flatpak")
-                    .args([
-                        "run",
-                        "com.google.Chrome",
+                let args = chrome_args(
+                    &[
                         "--no-first-run",
                         "--no-default-browser-check",
                         &port_flag,
                         &user_data_flag,
                         "https://gemini.google.com/app",
-                    ])
+                    ],
+                    proxy,
+                );
+                Command::new("flatpak")
+                    .args(["run", "com.google.Chrome"])
+                    .args(&args)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
             } else {
-                Self::spawn_native_chrome(&[
+                let args = chrome_args(
+                    &[
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        &port_flag,
+                        &user_data_flag,
+                        "https://gemini.google.com/app",
+                    ],
+                    proxy,
+                );
+                Self::spawn_native_chrome(&args)
+            }
+        } else {
+            let args = chrome_args(
+                &[
                     "--no-first-run",
                     "--no-default-browser-check",
                     &port_flag,
                     &user_data_flag,
                     "https://gemini.google.com/app",
-                ])
-            }
-        } else {
-            Self::spawn_native_chrome(&[
-                "--no-first-run",
-                "--no-default-browser-check",
-                &port_flag,
-                &user_data_flag,
-                "https://gemini.google.com/app",
-            ])
+                ],
+                proxy,
+            );
+            Self::spawn_native_chrome(&args)
         };
 
         if let Err(e) = launched {
@@ -188,7 +210,7 @@ impl BrowserLauncher {
         Err(format!("Timed out waiting for Chrome CDP on port {}", port))
     }
 
-    fn spawn_native_chrome(args: &[&str]) -> std::io::Result<std::process::Child> {
+    fn spawn_native_chrome(args: &[String]) -> std::io::Result<std::process::Child> {
         for bin in chrome_binaries() {
             if let Ok(child) = Command::new(&bin)
                 .args(args)
@@ -245,6 +267,24 @@ fn chrome_binaries() -> impl Iterator<Item = PathBuf> {
         .into_iter()
         .map(PathBuf::from),
     )
+}
+
+/// Chrome flags for one login window.
+///
+/// A Clash Verge mixed listener speaks HTTP, so `127.0.0.1:7901` is accepted
+/// and expanded to `http://127.0.0.1:7901`. The flag makes the sign-in exit
+/// address match the address later used by StreamGenerate for that account.
+fn chrome_args(base: &[&str], proxy: Option<&str>) -> Vec<String> {
+    let mut args: Vec<String> = base.iter().map(|value| (*value).to_string()).collect();
+    if let Some(raw) = proxy.map(str::trim).filter(|value| !value.is_empty()) {
+        let url = if raw.contains("://") {
+            raw.to_string()
+        } else {
+            format!("http://{raw}")
+        };
+        args.push(format!("--proxy-server={url}"));
+    }
+    args
 }
 
 #[cfg(windows)]

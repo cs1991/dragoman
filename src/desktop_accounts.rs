@@ -11,6 +11,9 @@ pub struct SavedAccount {
     name: String,
     enabled: bool,
     model: Option<String>,
+    proxy: Option<String>,
+    #[serde(skip)]
+    path: PathBuf,
 }
 
 pub struct AccountStore {
@@ -115,15 +118,58 @@ impl AccountStore {
     }
 
     fn entry(id: String, name: String, enabled: bool, path: &Path) -> SavedAccount {
+        let session = SessionData::load_from(path)
+            .ok()
+            .filter(|session| !session.cookie.is_empty() && !session.snlm0e.is_empty());
         SavedAccount {
             id,
             name,
             enabled,
-            model: SessionData::load_from(path)
-                .ok()
-                .filter(|session| !session.cookie.is_empty() && !session.snlm0e.is_empty())
-                .map(|session| session.model),
+            model: session.as_ref().map(|session| session.model.clone()),
+            proxy: session.and_then(|session| session.proxy),
+            path: path.to_path_buf(),
         }
+    }
+
+    /// Set or clear the egress proxy of one saved account.
+    pub fn set_proxy(&self, id: &str, proxy: Option<&str>) -> Result<(), String> {
+        let path = self.login_path(id)?;
+        let mut session = SessionData::load_from(&path)?;
+        session.proxy = proxy
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        session.save()
+    }
+
+    /// Spread all saved accounts over local Clash listeners.
+    ///
+    /// Accounts are ordered by name. `per_port` accounts share one listener,
+    /// which gives them the same public address. Returns the name and proxy of
+    /// every account that was written.
+    pub fn assign_proxies(
+        &self,
+        start_port: u16,
+        per_port: u16,
+    ) -> Result<Vec<(String, String)>, String> {
+        if per_port == 0 {
+            return Err("Accounts per port must be at least 1".into());
+        }
+        let mut accounts = self.list()?;
+        accounts.sort_by(|a, b| a.name.cmp(&b.name).then(b.enabled.cmp(&a.enabled)));
+        let mut assignments = Vec::with_capacity(accounts.len());
+        for (index, account) in accounts.iter().enumerate() {
+            let offset = u32::from(start_port) + (index as u32 / u32::from(per_port));
+            if offset > u32::from(u16::MAX) {
+                return Err("Proxy port range exceeds 65535".into());
+            }
+            let proxy = format!("http://127.0.0.1:{offset}");
+            let mut session = SessionData::load_from(&account.path)?;
+            session.proxy = Some(proxy.clone());
+            session.save()?;
+            assignments.push((account.name.clone(), proxy));
+        }
+        Ok(assignments)
     }
 
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
