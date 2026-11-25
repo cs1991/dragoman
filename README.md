@@ -359,7 +359,7 @@ dragoman login --account backup --profile-dir D:/chrome-profiles/backup --cdp-po
 
 ### Batch login
 
-`login-batch` signs in a list of Google accounts and writes one session file per account. The line format is `email----password---`, one account per line. A third field is accepted as `email----password----2FA密钥`, where the last field is the 32 character base32 authenticator secret.
+`login-batch` signs in a list of Google accounts and writes one session file per account. The line format is `email----password---`, one account per line. A third field is accepted as `email----password----2FA密钥`, where the last field is the 32 character base32 authenticator secret. Line breaks may be LF, CRLF or CR, and files may be UTF-8 or UTF-16. A file whose line breaks were lost is also split at each mailbox address.
 
 ```bash
 dragoman login-batch --file accounts.txt

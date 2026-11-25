@@ -53,6 +53,179 @@ pub struct BatchOptions {
     pub code_timeout: Duration,
 }
 
+/// Read an account file and decode it as UTF-8 or UTF-16.
+///
+/// Windows exports are frequently UTF-16 with a byte order mark while plain
+/// text exports are UTF-8. Byte order marked files are decoded first, then a
+/// UTF-16 layout without a mark is detected from the zero byte pattern.
+pub fn read_account_file(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("读取账号文件失败 {}: {}", path.display(), error))?;
+    Ok(decode_account_bytes(&bytes))
+}
+
+fn decode_account_bytes(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(rest).into_owned();
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        return decode_utf16(rest, true);
+    }
+    if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        return decode_utf16(rest, false);
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    let pairs = bytes.len() / 2;
+    if pairs >= 2 {
+        let even_zero = (0..pairs).filter(|i| bytes[i * 2] == 0).count();
+        let odd_zero = (0..pairs).filter(|i| bytes[i * 2 + 1] == 0).count();
+        if odd_zero * 2 >= pairs {
+            return decode_utf16(&bytes[..pairs * 2], true);
+        }
+        if even_zero * 2 >= pairs {
+            return decode_utf16(&bytes[..pairs * 2], false);
+        }
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
+    let units: Vec<u16> = bytes
+        .chunks(2)
+        .filter_map(|chunk| match chunk {
+            [low, high] => Some(if little_endian {
+                u16::from_le_bytes([*low, *high])
+            } else {
+                u16::from_be_bytes([*low, *high])
+            }),
+            _ => None,
+        })
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+/// Split account input into logical lines.
+///
+/// Files produced by spreadsheet exports, clipboard dumps and older editors
+/// use LF, CRLF or a bare CR as the record separator. Some exports also strip
+/// the line breaks and keep every account on one physical line. All of those
+/// shapes are normalized here. A line that holds more than one mailbox is cut
+/// at each mailbox start, which restores the original records even when the
+/// separator between them was lost.
+pub fn split_account_lines(raw: &str) -> Vec<String> {
+    let text = raw.trim_start_matches('\u{feff}');
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                normalized.push('\n');
+            }
+            '\u{2028}' | '\u{2029}' | '\u{0085}' => normalized.push('\n'),
+            other => normalized.push(other),
+        }
+    }
+    let mut text = normalized;
+    // Some chat clients serialize line breaks as a literal backslash plus n.
+    if !text.contains('\n') && text.contains("\\n") {
+        text = text.replace("\\n", "\n");
+    }
+
+    let mut lines = Vec::new();
+    for line in text.split('\n') {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let anchors = mailbox_starts(line);
+        if anchors.len() < 2 {
+            lines.push(line.trim_start_matches('\u{feff}').to_string());
+            continue;
+        }
+        for (position, start) in anchors.iter().enumerate() {
+            let end = anchors.get(position + 1).copied().unwrap_or(line.len());
+            let piece = line[*start..end].trim();
+            if !piece.is_empty() {
+                lines.push(piece.to_string());
+            }
+        }
+    }
+    lines
+}
+
+/// Byte offsets where a mailbox address begins.
+///
+/// A candidate needs an `@` with a non-empty local part, a dotted domain and
+/// an alphabetic top level label. The local part scan stops at a doubled
+/// dash, so the `----` separator that follows a password never becomes part of
+/// the next mailbox name.
+fn mailbox_starts(line: &str) -> Vec<usize> {
+    let bytes = line.as_bytes();
+    let mut starts = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'@' {
+            index += 1;
+            continue;
+        }
+        let mut start = index;
+        while start > 0 && is_mailbox_local(bytes[start - 1]) {
+            if bytes[start - 1] == b'-' && start >= 2 && bytes[start - 2] == b'-' {
+                break;
+            }
+            start -= 1;
+        }
+        if start == index {
+            index += 1;
+            continue;
+        }
+        let leading_ok =
+            start == 0 || bytes[start - 1] == b'-' || bytes[start - 1].is_ascii_whitespace();
+        if !leading_ok {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        let mut last_dot = None;
+        while end < bytes.len() && is_mailbox_domain(bytes[end]) {
+            // A doubled dash is the field separator used by every export
+            // shape, so the domain must not run past it into the password.
+            if bytes[end] == b'-' && end + 1 < bytes.len() && bytes[end + 1] == b'-' {
+                break;
+            }
+            if bytes[end] == b'.' {
+                last_dot = Some(end);
+            }
+            end += 1;
+        }
+        if let Some(dot) = last_dot {
+            let top_level = &bytes[dot + 1..end];
+            if top_level.len() >= 2 && top_level.iter().all(u8::is_ascii_alphabetic) {
+                if starts.last() != Some(&start) {
+                    starts.push(start);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    starts
+}
+
+fn is_mailbox_local(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'%' | b'+' | b'-')
+}
+
+fn is_mailbox_domain(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
+}
+
 /// Parse one `email----password---` account per line.
 ///
 /// A third field is accepted for exports shaped like
@@ -62,7 +235,7 @@ pub struct BatchOptions {
 pub fn parse_credentials(raw: &str) -> Result<Vec<Credential>, String> {
     let mut credentials = Vec::new();
     let mut seen = HashSet::new();
-    for (index, line) in raw.lines().enumerate() {
+    for (index, line) in split_account_lines(raw).iter().enumerate() {
         let line = line.trim().trim_start_matches('\u{feff}');
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -1149,6 +1322,92 @@ mod tests {
         assert_eq!(accounts[0].password, "pass-one");
         assert!(accounts[0].extra.is_none());
         assert_eq!(accounts[1].password, "pa-ss");
+    }
+
+    #[test]
+    fn splits_bare_cr_records() {
+        let raw = "first@example.asia----pass-one---\rsecond@example.com----pass-two---\r";
+        let accounts = parse_credentials(raw).unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].email, "first@example.asia");
+        assert_eq!(accounts[1].email, "second@example.com");
+        assert_eq!(accounts[1].password, "pass-two");
+    }
+
+    #[test]
+    fn splits_unicode_and_mixed_line_breaks() {
+        let raw = "a@example.asia----one---\u{2028}b@example.asia----two---\r\n\
+                   c@example.asia----three---\rb@example.asia----two---";
+        let accounts = parse_credentials(raw).unwrap();
+        assert_eq!(accounts.len(), 3);
+        assert_eq!(accounts[0].password, "one");
+        assert_eq!(accounts[1].password, "two");
+        assert_eq!(accounts[2].password, "three");
+    }
+
+    #[test]
+    fn splits_glued_two_field_records() {
+        let raw = "first@example.asia----pass-one---second@example.com----pass-two---";
+        let accounts = parse_credentials(raw).unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].email, "first@example.asia");
+        assert_eq!(accounts[0].password, "pass-one");
+        assert_eq!(accounts[1].email, "second@example.com");
+        assert_eq!(accounts[1].password, "pass-two");
+    }
+
+    #[test]
+    fn splits_glued_three_field_records() {
+        let raw = "first@example.asia----pass#one----GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ---\
+                   second@example.com----pass-two----JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP---";
+        let accounts = parse_credentials(raw).unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].password, "pass#one");
+        assert_eq!(
+            accounts[0].extra.as_deref(),
+            Some("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        );
+        assert_eq!(accounts[1].password, "pass-two");
+        assert_eq!(
+            accounts[1].extra.as_deref(),
+            Some("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
+        );
+        assert!(accounts[1].totp_secret().is_some());
+    }
+
+    #[test]
+    fn splits_glued_mixed_field_records() {
+        let raw = "first@example.asia----pass-one---second@example.com----pass-two----SECRET---\
+                   third@example.asia----pass-three---";
+        let accounts = parse_credentials(raw).unwrap();
+        assert_eq!(accounts.len(), 3);
+        assert!(accounts[0].extra.is_none());
+        assert_eq!(accounts[1].password, "pass-two");
+        assert_eq!(accounts[1].extra.as_deref(), Some("SECRET"));
+        assert!(accounts[2].extra.is_none());
+    }
+
+    #[test]
+    fn reads_utf16_file_with_a_byte_order_mark() {
+        let text = "first@example.asia----pass-one---\r\nsecond@example.com----pass-two---\r\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let path = std::env::temp_dir().join(format!(
+            "dragoman-accounts-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let raw = read_account_file(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let accounts = parse_credentials(&raw).unwrap();
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[1].email, "second@example.com");
     }
 
     #[test]

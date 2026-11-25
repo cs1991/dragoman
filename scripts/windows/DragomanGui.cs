@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -415,9 +416,10 @@ internal sealed class DragomanGui : Form
             var hint = new Label
             {
                 Dock = DockStyle.Top,
-                Height = 72,
+                Height = 84,
                 Padding = new Padding(4, 6, 4, 6),
                 Text = "每行一个账号：邮箱----密码--- 或 邮箱----密码----2FA密钥。可粘贴，也可从文件导入。"
+                    + "换行支持 CRLF、LF、CR，编码支持 UTF-8 与 UTF-16。"
                     + "验证码优先用账号自带的 2FA 密钥生成，没有密钥时从 google111111.asia 读取。"
             };
             var box = new TextBox
@@ -448,7 +450,7 @@ internal sealed class DragomanGui : Form
                 })
                 {
                     if (pick.ShowDialog(dialog) != DialogResult.OK) return;
-                    try { box.Text = File.ReadAllText(pick.FileName); }
+                    try { box.Text = NormalizeAccounts(ReadAccountFile(pick.FileName)); }
                     catch (Exception error)
                     {
                         MessageBox.Show(dialog, error.Message, "Dragoman");
@@ -465,7 +467,7 @@ internal sealed class DragomanGui : Form
             dialog.CancelButton = cancel;
 
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            var text = box.Text.Trim();
+            var text = NormalizeAccounts(box.Text).Trim();
             if (text.Length == 0) throw new InvalidOperationException("请粘贴或导入账号。");
             var path = Path.Combine(Path.GetTempPath(), "dragoman-batch-" + Guid.NewGuid().ToString("N") + ".txt");
             File.WriteAllText(path, text, new UTF8Encoding(false));
@@ -477,6 +479,68 @@ internal sealed class DragomanGui : Form
                 catch (UnauthorizedAccessException) { }
             }
         }
+    }
+
+    private static readonly Regex MailboxPattern = new Regex(
+        @"[A-Za-z0-9._%+]+(?:-[A-Za-z0-9._%+]+)*@(?:[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\.)+[A-Za-z]{2,}",
+        RegexOptions.Compiled);
+
+    private static string ReadAccountFile(string path)
+    {
+        var bytes = File.ReadAllBytes(path);
+        if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+            return Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3);
+        if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
+            return Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
+        if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
+            return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
+        var pairs = bytes.Length / 2;
+        if (pairs >= 2)
+        {
+            int evenZero = 0, oddZero = 0;
+            for (var i = 0; i < pairs; i++)
+            {
+                if (bytes[i * 2] == 0) evenZero++;
+                if (bytes[i * 2 + 1] == 0) oddZero++;
+            }
+            if (oddZero * 2 >= pairs) return Encoding.Unicode.GetString(bytes, 0, pairs * 2);
+            if (evenZero * 2 >= pairs) return Encoding.BigEndianUnicode.GetString(bytes, 0, pairs * 2);
+        }
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    private static string NormalizeAccounts(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        if (text[0] == '\uFEFF') text = text.Substring(1);
+        var lines = new List<string>();
+        foreach (var rawLine in text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0) continue;
+            var starts = new List<int>();
+            foreach (Match match in MailboxPattern.Matches(line))
+            {
+                if (match.Index > 0)
+                {
+                    var previous = line[match.Index - 1];
+                    if (previous != '-' && !char.IsWhiteSpace(previous)) continue;
+                }
+                starts.Add(match.Index);
+            }
+            if (starts.Count < 2)
+            {
+                lines.Add(line);
+                continue;
+            }
+            for (var i = 0; i < starts.Count; i++)
+            {
+                var end = i + 1 < starts.Count ? starts[i + 1] : line.Length;
+                var piece = line.Substring(starts[i], end - starts[i]).Trim();
+                if (piece.Length > 0) lines.Add(piece);
+            }
+        }
+        return string.Join("\r\n", lines);
     }
 
     private async Task RunBatchFile(string path)

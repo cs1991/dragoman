@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use dragoman::accounts::{AccountPool, BalanceStrategy, session_path_for_account};
 use dragoman::browser::{BrowserLauncher, CdpClient, default_profile_dir};
 use dragoman::desktop_accounts::AccountStore;
-use dragoman::login_batch::{BatchOptions, parse_credentials, run_batch};
+use dragoman::login_batch::{BatchOptions, parse_credentials, read_account_file, run_batch};
 use dragoman::proxy::server::{AppState, create_router};
 use dragoman::session::SessionData;
 use dragoman::web::GeminiWebClient;
@@ -359,8 +359,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dry_run,
         } => {
             let raw = match (file, text) {
-                (Some(path), _) => std::fs::read_to_string(&path)
-                    .map_err(|error| format!("读取账号文件失败 {}: {}", path.display(), error))?,
+                (Some(path), _) => read_account_file(&path)?,
                 (None, Some(text)) => text.replace("\\n", "\n"),
                 (None, None) => {
                     println!("粘贴账号，每行一个，格式：email----password---");
