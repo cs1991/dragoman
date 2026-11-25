@@ -6,48 +6,6 @@ use tracing::info;
 pub struct BrowserLauncher;
 
 impl BrowserLauncher {
-    /// Launch a normal Chrome window with no DevTools endpoint. Google rejects
-    /// sign-in when the browser runs with remote debugging, so the desktop
-    /// login signs in here and only starts a debug build after the account
-    /// cookies exist.
-    pub fn spawn_plain_login(
-        data_dir: PathBuf,
-        proxy: Option<&str>,
-    ) -> Result<std::process::Child, String> {
-        std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
-        let user_data_flag = format!("--user-data-dir={}", data_dir.display());
-        let args = chrome_args(
-            &[
-                "--no-first-run",
-                "--no-default-browser-check",
-                &user_data_flag,
-                "https://gemini.google.com/app",
-            ],
-            proxy,
-        );
-        Self::spawn_native_chrome(&args).map_err(|error| error.to_string())
-    }
-
-    /// Close the Chrome instance started for sign-in. A graceful taskkill lets
-    /// Chrome flush the cookie database, and a forced kill backs it up.
-    pub async fn close_login_browser(mut chrome: std::process::Child) {
-        let pid = chrome.id().to_string();
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid, "/T"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        for _ in 0..50 {
-            if chrome.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        let _ = chrome.kill();
-        let _ = chrome.wait();
-    }
-
     /// True when the Chrome profile already holds a Google account session.
     /// Cookie names are stored as plain text, cookie values stay encrypted.
     pub fn profile_has_google_session(data_dir: &std::path::Path) -> bool {
@@ -70,6 +28,66 @@ impl BrowserLauncher {
             }
         }
         false
+    }
+
+    /// Google account emails recorded in the Chrome profile.
+    ///
+    /// `Default/Preferences` is replaced atomically, so it stays readable while
+    /// Chrome runs. The login monitor uses it to notice a completed sign-in
+    /// without attaching DevTools to the sign-in page.
+    pub fn profile_google_accounts(data_dir: &std::path::Path) -> Vec<String> {
+        let path = data_dir.join("Default/Preferences");
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return Vec::new();
+        };
+
+        let mut emails = Vec::new();
+        match value.get("account_info") {
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    if let Some(email) = item.get("email").and_then(|value| value.as_str()) {
+                        emails.push(email.to_string());
+                    }
+                }
+            }
+            Some(serde_json::Value::Object(_)) => {
+                if let Some(email) = value
+                    .pointer("/account_info/email")
+                    .and_then(|value| value.as_str())
+                {
+                    emails.push(email.to_string());
+                }
+            }
+            _ => {}
+        }
+        emails.sort();
+        emails.dedup();
+        emails
+    }
+
+    /// Attach to the login browser that already runs for this profile, or start
+    /// a new one. The returned process handle is `None` when an existing Chrome
+    /// window was reused, so the caller never closes a browser it did not start.
+    pub async fn start_or_reuse_login(
+        data_dir: PathBuf,
+        proxy: Option<&str>,
+    ) -> Result<(u16, Option<std::process::Child>), String> {
+        let port_file = data_dir.join("DevToolsActivePort");
+        if let Ok(text) = std::fs::read_to_string(&port_file)
+            && let Some(port) = text
+                .lines()
+                .next()
+                .and_then(|line| line.trim().parse().ok())
+            && Self::is_cdp_ready(port).await
+        {
+            info!("Reusing login Chrome on CDP port {}", port);
+            return Ok((port, None));
+        }
+        let (port, chrome) = Self::start_desktop_login(data_dir, proxy).await?;
+        Ok((port, Some(chrome)))
     }
 
     /// Start a dedicated profile with a Chrome-assigned CDP port. Never attach
@@ -288,7 +306,7 @@ fn chrome_args(base: &[&str], proxy: Option<&str>) -> Vec<String> {
 }
 
 #[cfg(windows)]
-fn default_profile_dir() -> std::io::Result<PathBuf> {
+pub fn default_profile_dir() -> std::io::Result<PathBuf> {
     std::env::current_exe()?
         .parent()
         .map(|dir| dir.join("chrome_profile"))
@@ -296,7 +314,7 @@ fn default_profile_dir() -> std::io::Result<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn default_profile_dir() -> std::io::Result<PathBuf> {
+pub fn default_profile_dir() -> std::io::Result<PathBuf> {
     if let Ok(home) = std::env::var("HOME") {
         Ok(PathBuf::from(home).join(".config/dragoman/chrome_profile"))
     } else {

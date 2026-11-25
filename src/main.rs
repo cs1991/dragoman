@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use dragoman::accounts::{AccountPool, BalanceStrategy, session_path_for_account};
-use dragoman::browser::{BrowserLauncher, CdpClient};
+use dragoman::browser::{BrowserLauncher, CdpClient, default_profile_dir};
 use dragoman::desktop_accounts::AccountStore;
 use dragoman::proxy::server::{AppState, create_router};
 use dragoman::session::SessionData;
@@ -224,68 +224,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let path = store.login_path(&id)?;
                 let profile = AccountStore::profile_dir(&id, &std::env::current_exe()?)?;
                 let launch_error =
-                    "Chrome 启动失败。请确认已安装 Chrome，并关闭该账号之前打开的 Chrome 窗口。";
+                    "Chrome 启动失败。请确认已安装 Chrome，并关闭占用了该账号配置目录的进程。";
 
-                // Google rejects sign-in while DevTools is enabled. An
-                // interactive sign-in runs in a plain Chrome window first, then
-                // a short DevTools session reads the stored cookies.
+                // One Chrome window stays open for the whole login. The monitor
+                // polls the profile for a completed Google sign-in and attaches
+                // DevTools only after the account cookies exist, so the sign-in
+                // page itself never sees an active debugger.
                 let had_session = BrowserLauncher::profile_has_google_session(&profile);
-                let mut session: Option<SessionData> = None;
-                let mut capture_chrome = None;
+                let known_accounts = BrowserLauncher::profile_google_accounts(&profile);
 
+                let (port, _chrome) =
+                    BrowserLauncher::start_or_reuse_login(profile.clone(), proxy.as_deref())
+                        .await
+                        .map_err(|_| launch_error)?;
+                println!("Chrome 已打开，正在监听登录状态。登录成功后自动添加账号，窗口保持打开。");
+
+                let mut session: Option<SessionData> = None;
                 if had_session {
-                    println!("Found an existing Google session, reading it...");
-                    let (port, chrome) =
-                        BrowserLauncher::start_desktop_login(profile.clone(), proxy.as_deref())
-                            .await
-                            .map_err(|_| launch_error)?;
-                    session = capture_with_timeout(port, path.clone(), 30).await;
-                    if session.is_some() {
-                        capture_chrome = Some(chrome);
-                    } else {
-                        BrowserLauncher::close_login_browser(chrome).await;
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    }
+                    session = capture_with_timeout(port, path.clone(), 15).await;
                 }
 
                 if session.is_none() {
-                    println!("Open Chrome, sign in to Google and open Gemini...");
-                    let mut chrome =
-                        BrowserLauncher::spawn_plain_login(profile.clone(), proxy.as_deref())
-                            .map_err(|_| launch_error)?;
-                    let wait_seconds = if had_session { 180 } else { 240 };
-                    let deadline =
-                        std::time::Instant::now() + std::time::Duration::from_secs(wait_seconds);
-                    loop {
-                        if chrome.try_wait().ok().flatten().is_some() {
-                            break;
-                        }
-                        if !had_session && BrowserLauncher::profile_has_google_session(&profile) {
-                            break;
-                        }
-                        if std::time::Instant::now() >= deadline {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    BrowserLauncher::close_login_browser(chrome).await;
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-                    let (port, chrome) =
-                        BrowserLauncher::start_desktop_login(profile, proxy.as_deref())
-                            .await
-                            .map_err(|_| launch_error)?;
-                    session = capture_with_timeout(port, path.clone(), 60).await;
-                    capture_chrome = Some(chrome);
+                    session =
+                        watch_login_window(port, path.clone(), &profile, &known_accounts).await;
                 }
 
                 let Some(mut session) = session else {
-                    if let Some(chrome) = capture_chrome {
-                        BrowserLauncher::close_login_browser(chrome).await;
-                    }
-                    return Err("读取会话失败。请重新登录，并在 Gemini 页面加载完成后重试。".into());
+                    return Err(
+                        "Chrome 已关闭。重新打开登录窗口，完成登录后账号会自动添加。".into(),
+                    );
                 };
+
+                if let Ok(previous) = SessionData::load_from(&path) {
+                    session.local_ip = previous.local_ip;
+                    if proxy.is_none() {
+                        session.proxy = previous.proxy;
+                    }
+                }
 
                 if let Some(value) = proxy.filter(|value| !value.trim().is_empty()) {
                     session.proxy = Some(value);
@@ -293,9 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session
                     .save()
                     .map_err(|_| "保存会话失败。请检查配置目录权限。")?;
-                if let Some(chrome) = capture_chrome {
-                    BrowserLauncher::close_login_browser(chrome).await;
-                }
+                println!("SUCCESS: 账号已保存，Chrome 窗口保持打开。");
                 return Ok(());
             }
             let session_path = match session_path_for_account(&account) {
@@ -313,11 +286,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cdp_port
             );
 
+            let profile = match profile_dir.clone() {
+                Some(dir) => dir,
+                None => default_profile_dir()?,
+            };
+            let known_accounts = BrowserLauncher::profile_google_accounts(&profile);
             BrowserLauncher::ensure_chrome_running(cdp_port, profile_dir, proxy.as_deref())
                 .await
                 .map_err(|e| format!("Failed to launch browser: {}", e))?;
+            println!("Chrome 已打开，正在监听登录状态。登录成功后自动保存，窗口保持打开。");
 
-            let mut session = capture_session(cdp_port, session_path.clone(), false).await?;
+            let Some(mut session) =
+                watch_login_window(cdp_port, session_path.clone(), &profile, &known_accounts).await
+            else {
+                return Err("Chrome 已关闭。重新运行 login，完成登录后会话会自动保存。".into());
+            };
             if let Some(value) = proxy.filter(|value| !value.trim().is_empty()) {
                 session.proxy = Some(value);
             }
@@ -326,7 +309,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "\nSUCCESS: Saved authentication session to {}",
                 session_path.display()
             );
-            println!("You can now close Chrome completely.");
+            println!("Chrome 窗口保持打开，关闭与否都不影响使用。");
             println!("Run 'dragoman serve' to launch the proxy without any browser running.");
         }
         Commands::DesktopAccounts { action } => {
@@ -429,7 +412,7 @@ async fn capture_with_timeout(
 ) -> Option<SessionData> {
     tokio::time::timeout(std::time::Duration::from_secs(seconds), async {
         loop {
-            if let Ok(session) = capture_session(cdp_port, session_path.clone(), true).await {
+            if let Ok(session) = capture_session(cdp_port, session_path.clone()).await {
                 return session;
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -439,12 +422,115 @@ async fn capture_with_timeout(
     .ok()
 }
 
+/// Watch one open login window until the Google account is usable.
+///
+/// The browser target is asked for its cookie list once a second, so the sign-in
+/// is noticed the moment the network service stores the auth cookie. The profile
+/// files act as a second signal. DevTools is attached to a page only after one of
+/// those signals is present, which keeps the sign-in page free of a debugger.
+async fn watch_login_window(
+    cdp_port: u16,
+    session_path: std::path::PathBuf,
+    profile: &std::path::Path,
+    known_accounts: &[String],
+) -> Option<SessionData> {
+    let fast_gap = std::time::Duration::from_secs(6);
+    let slow_gap = std::time::Duration::from_secs(30);
+    let mut had_session = BrowserLauncher::profile_has_google_session(profile);
+    let mut last_attempt: Option<std::time::Instant> = None;
+    let mut failures = 0u8;
+    let mut closed_polls = 0u8;
+    let mut browser: Option<CdpClient> = None;
+    let mut announced = false;
+
+    loop {
+        let live_cookie = match browser.as_ref() {
+            Some(client) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    client.auth_cookie_present(),
+                )
+                .await
+                {
+                    Ok(Ok(present)) => {
+                        closed_polls = 0;
+                        present
+                    }
+                    _ => {
+                        browser = None;
+                        closed_polls += 1;
+                        false
+                    }
+                }
+            }
+            None => {
+                match CdpClient::connect_browser(cdp_port).await {
+                    Ok(client) => {
+                        browser = Some(client);
+                        closed_polls = 0;
+                    }
+                    Err(_) => closed_polls += 1,
+                }
+                false
+            }
+        };
+        if closed_polls >= 3 {
+            println!("Chrome 已关闭，停止监听登录状态。");
+            return None;
+        }
+
+        let accounts = BrowserLauncher::profile_google_accounts(profile);
+        let new_account = accounts.iter().any(|email| !known_accounts.contains(email));
+        let has_session = BrowserLauncher::profile_has_google_session(profile);
+        let session_appeared = has_session && !had_session;
+        had_session = has_session;
+
+        let gap = if failures >= 5 { slow_gap } else { fast_gap };
+        let interval_ok = last_attempt.is_none_or(|at| at.elapsed() >= gap);
+        let should_capture =
+            interval_ok && (new_account || session_appeared || live_cookie || has_session);
+
+        if !announced && (new_account || session_appeared || live_cookie) {
+            println!("已检测到登录状态，正在读取会话...");
+            announced = true;
+        }
+
+        if should_capture {
+            last_attempt = Some(std::time::Instant::now());
+            if let Ok(captured) = capture_session(cdp_port, session_path.clone()).await {
+                if let Some(email) = accounts.last() {
+                    println!("已识别登录账号: {}", email);
+                }
+                return Some(captured);
+            }
+            failures = failures.saturating_add(1);
+            if new_account || session_appeared {
+                // The Gemini tab can still be finishing the redirect that
+                // follows the Google sign-in. Retry briefly before falling
+                // back to the slow poll.
+                for _ in 0..4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                    if let Ok(captured) = capture_session(cdp_port, session_path.clone()).await {
+                        if let Some(email) = accounts.last() {
+                            println!("已识别登录账号: {}", email);
+                        }
+                        return Some(captured);
+                    }
+                }
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    }
+}
+
 async fn capture_session(
     cdp_port: u16,
     session_path: std::path::PathBuf,
-    desktop: bool,
 ) -> Result<SessionData, Box<dyn std::error::Error>> {
-    let client = CdpClient::connect_to_gemini_tab(cdp_port, !desktop).await?;
+    // Open a Gemini tab when the login window has none. The window stays open,
+    // so the extra tab costs nothing and a closed tab cannot stall the capture.
+    let client = CdpClient::connect_to_gemini_tab(cdp_port, true).await?;
 
     let snlm0e = client
         .evaluate_js("window.WIZ_global_data?.SNlM0e || ''")
@@ -506,7 +592,7 @@ async fn capture_session(
         cookie_header = parts.join("; ");
     }
 
-    if desktop && (!has_auth_cookie || f_sid.is_empty() || bl.is_empty()) {
+    if !has_auth_cookie || f_sid.is_empty() || bl.is_empty() {
         return Err("Finish signing in to Gemini first.".into());
     }
     Ok(SessionData {

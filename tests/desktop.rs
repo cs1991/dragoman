@@ -133,7 +133,12 @@ fn assign_proxies_groups_accounts_and_set_proxy_can_clear() {
     fixture.save("sessions/b.json");
     fixture.save("sessions/c.json");
 
-    let output = fixture.manage(&["assign-proxies", "--start-ip=2", "--proxy-port=7897", "--per-ip=2"]);
+    let output = fixture.manage(&[
+        "assign-proxies",
+        "--start-ip=2",
+        "--proxy-port=7897",
+        "--per-ip=2",
+    ]);
     assert!(
         output.status.success(),
         "{}",

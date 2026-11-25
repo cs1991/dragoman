@@ -5,9 +5,9 @@ setlocal EnableExtensions DisableDelayedExpansion
 set "loginExit=%errorlevel%"
 echo.
 if "%loginExit%"=="0" (
-    echo Session saved. Run start.cmd to start the proxy.
+    echo Session saved. Chrome stays open. Run start.cmd to start the proxy.
 ) else (
-    echo If Chrome is still signing in, finish in Chrome and run login.cmd again.
+    echo The Chrome window closed before the sign-in finished. Run login.cmd and keep it open.
 )
 pause
 exit /b %loginExit%

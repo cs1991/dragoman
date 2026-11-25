@@ -153,10 +153,7 @@ impl AccountStore {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        session.local_ip = match local_ip
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        session.local_ip = match local_ip.map(str::trim).filter(|value| !value.is_empty()) {
             Some(value) => {
                 value
                     .parse::<std::net::IpAddr>()

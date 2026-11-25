@@ -110,7 +110,7 @@ internal sealed class DragomanGui : Form
         Shown += async (s, e) => await Run(RefreshAccounts);
         FormClosing += OnClosing;
         UpdateButtons();
-        message.Text = "账号更改前请停止代理。登录完成后可关闭对应的 Chrome 窗口。";
+        message.Text = "账号更改前请停止代理。登录成功后账号自动添加，Chrome 窗口保持打开。";
     }
 
     private static FlowLayoutPanel Bar(TableLayoutPanel layout, int row)
@@ -343,20 +343,61 @@ internal sealed class DragomanGui : Form
             arguments += " --proxy=" + proxy;
         }
         login = Spawn(arguments);
-        message.Text = "请在 Chrome 中完成登录并打开 Gemini。已有同账号的 Chrome 窗口时，请关闭后重试。";
+        message.Text = "Chrome 正在打开。完成 Google 登录后账号自动添加，窗口保持打开。";
         UpdateButtons();
         try
         {
-            await ReadResult(login, "登录未完成。请确认已安装 Chrome，关闭该账号的旧窗口后重试，并在 4 分钟内打开 Gemini。");
-            message.Text = "会话已保存。现在可以关闭对应的 Chrome 窗口。";
+            await ReadLogin(login);
+            message.Text = "账号已添加。Chrome 窗口保持打开，关闭与否都不影响使用。";
             await RefreshAccounts();
         }
         catch (InvalidOperationException)
         {
             if (!loginCanceled) throw;
-            message.Text = "已取消登录。可以关闭此次登录打开的 Chrome 窗口。";
+            message.Text = "已取消登录。Chrome 窗口保持打开。";
         }
         finally { login.Dispose(); login = null; }
+    }
+
+    private async Task ReadLogin(Process child)
+    {
+        var output = Task.Run(async () =>
+        {
+            string line;
+            while ((line = await child.StandardOutput.ReadLineAsync()) != null)
+            {
+                var text = LoginProgress(line);
+                if (text == null || IsDisposed || !IsHandleCreated) continue;
+                try { BeginInvoke(new Action(() => { if (!IsDisposed) message.Text = text; })); }
+                catch (InvalidOperationException) { }
+            }
+        });
+        var error = child.StandardError.ReadToEndAsync();
+        await Task.Run(() => child.WaitForExit());
+        // Chrome inherits the redirected pipe handles and keeps them open after
+        // dragoman.exe exits, so waiting for stream end would hang the dialog.
+        await Task.WhenAny(Task.WhenAll(output, error), Task.Delay(1500));
+        if (child.ExitCode != 0)
+        {
+            var text = "登录未完成。请确认已安装 Chrome，并保持登录窗口打开后重试。";
+            if (error.Status == TaskStatus.RanToCompletion)
+            {
+                var tail = error.Result.Split('\n').Select(value => value.Trim())
+                    .LastOrDefault(value => value.Length > 0);
+                if (!String.IsNullOrEmpty(tail))
+                    text = tail.StartsWith("Error: ", StringComparison.Ordinal) ? tail.Substring(7) : tail;
+            }
+            throw new InvalidOperationException(text);
+        }
+    }
+
+    private static string LoginProgress(string line)
+    {
+        if (line.StartsWith("SUCCESS", StringComparison.Ordinal)) return "账号已添加。Chrome 窗口保持打开。";
+        if (line.Contains("已检测到登录状态")) return "已检测到登录状态，正在读取会话…";
+        if (line.Contains("已识别登录")) return "已识别登录状态，正在保存账号…";
+        if (line.Contains("监听登录状态")) return "正在监听登录状态。完成 Google 登录后账号会自动添加。";
+        return null;
     }
 
     private async Task ToggleAccount()

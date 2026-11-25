@@ -93,7 +93,57 @@ impl CdpClient {
             .ok_or_else(|| "Gemini tab has no webSocketDebuggerUrl".to_string())?;
 
         info!("Connecting to CDP WebSocket: {}", ws_url);
-        let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        let client = Self::open(&ws_url).await?;
+
+        // Enable Runtime domain
+        client.call_cdp("Runtime.enable", json!({})).await?;
+
+        Ok(client)
+    }
+
+    /// Attach to the browser target instead of a page. Cookie reads on this
+    /// session never touch the page the user is signing in on.
+    pub async fn connect_browser(cdp_port: u16) -> Result<Self, String> {
+        let http_client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .map_err(|e| format!("Could not initialize the local CDP client: {e}"))?;
+        let url = format!("http://127.0.0.1:{}/json/version", cdp_port);
+        let version: serde_json::Value = http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("Could not connect to CDP on port {}: {}", cdp_port, e))?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        let ws_url = version
+            .get("webSocketDebuggerUrl")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "CDP browser endpoint has no webSocketDebuggerUrl".to_string())?;
+        Self::open(ws_url).await
+    }
+
+    /// True when the browser already holds a Google auth cookie. The network
+    /// service answers this in real time, so it fires right after the sign-in
+    /// completes instead of waiting for the on-disk cookie store to commit.
+    pub async fn auth_cookie_present(&self) -> Result<bool, String> {
+        let value = self.call_cdp("Storage.getCookies", json!({})).await?;
+        let cookies = value
+            .get("result")
+            .and_then(|result| result.get("cookies"))
+            .and_then(|cookies| cookies.as_array())
+            .ok_or_else(|| "Storage.getCookies returned no cookie list".to_string())?;
+        Ok(cookies.iter().any(|cookie| {
+            cookie
+                .get("name")
+                .and_then(|name| name.as_str())
+                .is_some_and(|name| matches!(name, "__Secure-1PSID" | "__Secure-3PSID" | "SAPISID"))
+        }))
+    }
+
+    async fn open(ws_url: &str) -> Result<Self, String> {
+        let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
             .await
             .map_err(|e| format!("Failed to connect to CDP WebSocket: {}", e))?;
 
@@ -119,16 +169,11 @@ impl CdpClient {
             }
         });
 
-        let client = Self {
+        Ok(Self {
             ws_write: write_mutex,
             req_id: AtomicU64::new(1),
             pending_responses: pending,
-        };
-
-        // Enable Runtime domain
-        client.call_cdp("Runtime.enable", json!({})).await?;
-
-        Ok(client)
+        })
     }
 
     pub async fn call_cdp(

@@ -42,7 +42,7 @@ Real-Time Stream Parser
   └── Emits standard OpenAI SSE chunks to the agent
 ```
 
-> Browser usage: Chrome runs only once during `dragoman login` to read session cookies and the anti-CSRF token (`SNlM0e`). Dragoman saves these credentials locally and shuts down Chrome.
+> Browser usage: Chrome runs only during `dragoman login` to read session cookies and the anti-CSRF token (`SNlM0e`). Dragoman saves these credentials locally and leaves the login window open.
 
 ---
 
@@ -71,8 +71,9 @@ Run the login command once to link your Google AI Pro account:
 Steps performed:
 1. Dragoman starts Chrome with remote debugging.
 2. Log in at [gemini.google.com](https://gemini.google.com).
-3. Dragoman reads the session tokens and saves them to `~/.config/dragoman/session.json`.
-4. Close Chrome when prompted.
+3. Dragoman watches the profile and detects the completed Google sign-in.
+4. Dragoman reads the session tokens and saves them to `~/.config/dragoman/session.json`.
+5. The Chrome window stays open, close it whenever you want.
 
 ### 3. Verify Direct RPC Connection
 
@@ -100,7 +101,7 @@ Build the Windows package with Cargo and the Windows .NET Framework compiler.
 scripts\package.cmd
 ```
 
-Open `dist\dragoman-windows\DragomanGui.exe`. Keep `dragoman.exe` beside it in a writable directory. Add an account by entering a local alias. Chrome opens a normal window with no DevTools endpoint, because Google rejects sign-in while remote debugging is enabled. Sign in to Google and open Gemini. Dragoman watches for the Google session cookies, restarts that profile with DevTools for a few seconds, reads the session and saves it, then closes that window. Each desktop account has its own Chrome profile under `desktop-profiles` beside the executables. For example, `work` uses `desktop-profiles\account-work.profile`. Keep the profile directories private. The desktop list also shows existing CLI and legacy sessions.
+Open `dist\dragoman-windows\DragomanGui.exe`. Keep `dragoman.exe` beside it in a writable directory. Add an account by entering a local alias. Chrome opens one window and Dragoman watches that window for the whole sign-in. The session is read and saved the moment the Google cookies appear, so the account lands in the table while Chrome stays open. DevTools is attached only after the sign-in cookies exist, which keeps the login page clear of an active debugger. Each desktop account has its own Chrome profile under `desktop-profiles` beside the executables. For example, `work` uses `desktop-profiles\account-work.profile`. Keep the profile directories private. The desktop list also shows existing CLI and legacy sessions.
 
 Use the account table to sign in again, enable, disable, or delete a saved proxy session. Deletion retains the Chrome profile. Stop the proxy before changing accounts. If you also run `dragoman serve` separately, stop that instance before changing its sessions.
 
@@ -118,7 +119,7 @@ Run the packaging script from Windows Command Prompt with Cargo on `PATH` or in 
 
 The script stops running CLI instances from `target/release` and `dist/dragoman-windows` before building. It copies both executables, launch scripts, README, and license into `dist/dragoman-windows` without making a ZIP. It leaves any existing browser profiles in both directories intact.
 
-In the output folder, double-click `login.cmd` for first-time setup. Finish signing in to Gemini in Chrome. If `login.cmd` did not save a session on the first run, leave Chrome open and run it again. After it reports success, close that Chrome window and double-click `start.cmd`. The startup window shows the error if the proxy exits.
+In the output folder, double-click `login.cmd` for first-time setup. Finish signing in to Gemini in Chrome. `login.cmd` saves the session as soon as the sign-in completes and keeps the Chrome window open. After it reports success, double-click `start.cmd`. The startup window shows the error if the proxy exits.
 
 Dragoman uses the Windows system proxy when an account has no `proxy` field. If Gemini opens in Chrome but Dragoman reports a connection error, check that the proxy is running and enabled in Windows Settings. A proxy set only inside Chrome does not apply to Dragoman. When starting Dragoman from a terminal, you can also set `HTTPS_PROXY` for that process. A per-account proxy overrides both values. The next section describes the field.
 

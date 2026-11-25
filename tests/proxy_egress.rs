@@ -38,10 +38,7 @@ async fn account_proxy_carries_requests_through_the_listener() {
     });
 
     // A bare host:port is accepted and treated as an HTTP proxy.
-    let account = Account::new(
-        "proxied",
-        session(Some(format!("127.0.0.1:{port}")), None),
-    );
+    let account = Account::new("proxied", session(Some(format!("127.0.0.1:{port}")), None));
     let response = account
         .http
         .get("http://example.test/ping")
