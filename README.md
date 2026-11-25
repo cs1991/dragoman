@@ -359,7 +359,7 @@ dragoman login --account backup --profile-dir D:/chrome-profiles/backup --cdp-po
 
 ### Batch login
 
-`login-batch` signs in a list of Google accounts and writes one session file per account. The line format is `email----password---`, one account per line.
+`login-batch` signs in a list of Google accounts and writes one session file per account. The line format is `email----password---`, one account per line. A third field is accepted as `email----password----2FA密钥`, where the last field is the 32 character base32 authenticator secret.
 
 ```bash
 dragoman login-batch --file accounts.txt
@@ -370,7 +370,7 @@ With no `--file` and no `--text`, the command reads standard input. Paste the ac
 
 Every account gets a Chrome profile under `desktop-profiles/batch-<name>.profile`. The profile keeps the trusted-device cookie, so a later run signs in with fewer prompts. Sessions are saved to `~/.config/dragoman/sessions/<name>.json` and are ready for `dragoman serve`.
 
-When Google asks for an email verification code, Dragoman posts the account email to `https://google111111.asia/` and reads the newest six digit code from that inbox. The wait limit is 120 seconds and can be changed with `--code-timeout`.
+When the account line carries an authenticator secret, Dragoman computes a six digit TOTP code locally and submits it first. When the page still asks for a code, or the line has no secret, Dragoman posts the account email to `https://google111111.asia/` and reads the newest six digit code from that inbox. The wait limit is 120 seconds and can be changed with `--code-timeout`.
 
 ```bash
 dragoman login-batch --file accounts.txt --proxy http://127.0.0.1:7901

@@ -415,10 +415,10 @@ internal sealed class DragomanGui : Form
             var hint = new Label
             {
                 Dock = DockStyle.Top,
-                Height = 58,
+                Height = 72,
                 Padding = new Padding(4, 6, 4, 6),
-                Text = "每行一个账号：邮箱----密码---  可粘贴，也可从文件导入。"
-                    + "登录需要验证码时，程序会自动从 google111111.asia 读取。"
+                Text = "每行一个账号：邮箱----密码--- 或 邮箱----密码----2FA密钥。可粘贴，也可从文件导入。"
+                    + "验证码优先用账号自带的 2FA 密钥生成，没有密钥时从 google111111.asia 读取。"
             };
             var box = new TextBox
             {

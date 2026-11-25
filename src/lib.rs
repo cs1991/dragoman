@@ -5,4 +5,5 @@ pub mod login_batch;
 pub mod openai;
 pub mod proxy;
 pub mod session;
+pub mod totp;
 pub mod web;

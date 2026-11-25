@@ -24,6 +24,18 @@ const ACCOUNT_DEADLINE: Duration = Duration::from_secs(360);
 pub struct Credential {
     pub email: String,
     pub password: String,
+    /// Third field of the line. A 32 character base32 authenticator secret is
+    /// used for the code challenge, other values are kept only for reporting.
+    pub extra: Option<String>,
+}
+
+impl Credential {
+    /// Authenticator secret from the third field when it is valid base32.
+    pub fn totp_secret(&self) -> Option<String> {
+        self.extra
+            .as_deref()
+            .and_then(crate::totp::normalize_secret)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,8 +55,10 @@ pub struct BatchOptions {
 
 /// Parse one `email----password---` account per line.
 ///
-/// Blank lines and `#` comments are ignored. The trailing separator dashes are
-/// removed from the password, while dashes inside the password are preserved.
+/// A third field is accepted for exports shaped like
+/// `email----password----secret`. Blank lines and `#` comments are ignored. The
+/// trailing separator dashes are removed from the last field, while dashes
+/// inside the password are preserved.
 pub fn parse_credentials(raw: &str) -> Result<Vec<Credential>, String> {
     let mut credentials = Vec::new();
     let mut seen = HashSet::new();
@@ -53,12 +67,27 @@ pub fn parse_credentials(raw: &str) -> Result<Vec<Credential>, String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (email, password) = line
-            .split_once("----")
-            .or_else(|| line.split_once('\t'))
-            .ok_or_else(|| format!("第 {} 行缺少分隔符。格式：email----password---", index + 1))?;
-        let email = email.trim();
-        let password = password.trim().trim_end_matches('-').trim();
+        let mut parts: Vec<&str> = if line.contains("----") {
+            line.split("----").map(str::trim).collect()
+        } else {
+            line.split('\t').map(str::trim).collect()
+        };
+        if parts.len() < 2 {
+            return Err(format!(
+                "第 {} 行缺少分隔符。格式：email----password--- 或 email----password----2FA密钥",
+                index + 1
+            ));
+        }
+        if let Some(last) = parts.last_mut() {
+            *last = last.trim_end_matches('-').trim();
+        }
+        let email = parts[0];
+        let password = parts[1];
+        let extra = parts
+            .get(2)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         if !email.contains('@') {
             return Err(format!("第 {} 行的邮箱无效：{email}", index + 1));
         }
@@ -69,11 +98,15 @@ pub fn parse_credentials(raw: &str) -> Result<Vec<Credential>, String> {
             credentials.push(Credential {
                 email: email.to_string(),
                 password: password.to_string(),
+                extra,
             });
         }
     }
     if credentials.is_empty() {
-        return Err("没有可登录的账号。每行格式：email----password---".to_string());
+        return Err(
+            "没有可登录的账号。每行格式：email----password--- 或 email----password----2FA密钥"
+                .to_string(),
+        );
     }
     Ok(credentials)
 }
@@ -241,6 +274,7 @@ async fn drive_google_login(
     let mut last_email_click: Option<Instant> = None;
     let mut last_password_click: Option<Instant> = None;
     let mut code_requested = false;
+    let mut totp_submitted = false;
     let mut last_url = String::new();
     let mut failures = 0u8;
 
@@ -430,21 +464,57 @@ async fn drive_google_login(
             continue;
         }
         if has_code {
+            // A third field in the account line can hold the authenticator
+            // secret. Submit a generated code first, because an authenticator
+            // challenge has no mailbox fallback on many accounts.
+            let mentions_authenticator = text.contains("身份验证器")
+                || text.contains("验证器")
+                || text.contains("Authenticator")
+                || text.contains("验证码应用");
+            let mentions_email = text.contains("电子邮件")
+                || text.contains("邮件")
+                || text.to_ascii_lowercase().contains("email");
+            if !totp_submitted
+                && (mentions_authenticator || !mentions_email)
+                && let Some(secret) = credential.totp_secret()
+                && let Some(code) = crate::totp::current_code(&secret)
+            {
+                println!("  已用账号内置 2FA 密钥生成验证码");
+                fill_code_input(client, &code).await?;
+                click_texts(client, &["下一步", "Next", "验证", "Verify"]).await;
+                totp_submitted = true;
+                tokio::time::sleep(Duration::from_secs(6)).await;
+                continue;
+            }
             if !code_requested {
                 let clicked = click_texts(
                     client,
                     &[
+                        "尝试其他方式",
+                        "使用其他方式",
+                        "Try another way",
                         "获取验证码",
                         "发送验证码",
                         "发送代码",
+                        "通过电子邮件发送",
+                        "电子邮件",
                         "Send code",
                         "Get a verification code",
                         "Get code",
+                        "Email",
                     ],
                 )
                 .await;
                 if !clicked.is_empty() {
-                    println!("  已请求发送验证码");
+                    println!("  已点击：{clicked}");
+                    if clicked.contains("其他方式")
+                        || clicked.to_ascii_lowercase().contains("another way")
+                    {
+                        // A method chooser opened. Re-evaluate the page so the
+                        // email option can be picked on the next pass.
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
                 }
                 code_requested = true;
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1077,7 +1147,28 @@ mod tests {
         assert_eq!(accounts.len(), 2);
         assert_eq!(accounts[0].email, "first@example.asia");
         assert_eq!(accounts[0].password, "pass-one");
+        assert!(accounts[0].extra.is_none());
         assert_eq!(accounts[1].password, "pa-ss");
+    }
+
+    #[test]
+    fn parses_the_three_field_format() {
+        let raw = "first@example.asia----pass#one----GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\n\
+                   second@example.asia----plain----\n\
+                   third@example.asia----dash-pass---- note\n";
+        let accounts = parse_credentials(raw).unwrap();
+        assert_eq!(accounts.len(), 3);
+        assert_eq!(accounts[0].password, "pass#one");
+        assert_eq!(
+            accounts[0].extra.as_deref(),
+            Some("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        );
+        assert!(accounts[0].totp_secret().is_some());
+        assert_eq!(accounts[1].password, "plain");
+        assert!(accounts[1].extra.is_none());
+        assert_eq!(accounts[2].password, "dash-pass");
+        assert_eq!(accounts[2].extra.as_deref(), Some("note"));
+        assert!(accounts[2].totp_secret().is_none());
     }
 
     #[test]

@@ -68,7 +68,7 @@ enum Commands {
     },
     /// Sign in many Google accounts and save one Gemini session per account
     LoginBatch {
-        /// Account file, one `email----password---` per line
+        /// Account file, one `email----password---` per line, optional `----2FA密钥`
         #[arg(short, long)]
         file: Option<std::path::PathBuf>,
 
@@ -384,10 +384,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if dry_run {
                 for (index, credential) in credentials.iter().enumerate() {
                     println!(
-                        "{}. {}  密码长度 {}",
+                        "{}. {}  密码长度 {}{}",
                         index + 1,
                         credential.email,
-                        credential.password.chars().count()
+                        credential.password.chars().count(),
+                        if credential.totp_secret().is_some() {
+                            "  2FA 密钥"
+                        } else {
+                            ""
+                        }
                     );
                 }
                 return Ok(());
