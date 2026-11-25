@@ -553,6 +553,10 @@ async fn drive_google_login(
             .get("code")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+        let email_option = state
+            .get("emailOption")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
 
         if has_identifier && email_sent && !password_sent {
             let empty = client
@@ -671,6 +675,15 @@ async fn drive_google_login(
             tokio::time::sleep(Duration::from_secs(6)).await;
             continue;
         }
+        // After the password Google may ask how to verify the account. Pick
+        // the first email code option instead of opening the other-methods
+        // menu, then read the code from the mailbox site.
+        if email_option && !has_code && click_first_email_option(client).await {
+            println!("  选择第一个邮件验证码登录方式");
+            code_requested = true;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            continue;
+        }
         if has_code {
             // A third field in the account line can hold the authenticator
             // secret. Submit a generated code first, because an authenticator
@@ -681,7 +694,11 @@ async fn drive_google_login(
                 || text.contains("验证码应用");
             let mentions_email = text.contains("电子邮件")
                 || text.contains("邮件")
+                || text.contains("发送验证码")
+                || text.contains("验证码已发送")
+                || text.contains("已向")
                 || text.to_ascii_lowercase().contains("email");
+            let mentions_email = mentions_email || text.to_ascii_lowercase().contains("sent");
             if !totp_submitted
                 && (mentions_authenticator || !mentions_email)
                 && let Some(secret) = credential.totp_secret()
@@ -695,37 +712,41 @@ async fn drive_google_login(
                 continue;
             }
             if !code_requested {
-                let clicked = click_texts(
-                    client,
-                    &[
-                        "尝试其他方式",
-                        "使用其他方式",
-                        "Try another way",
-                        "获取验证码",
-                        "发送验证码",
-                        "发送代码",
-                        "通过电子邮件发送",
-                        "电子邮件",
-                        "Send code",
-                        "Get a verification code",
-                        "Get code",
-                        "Email",
-                    ],
-                )
-                .await;
-                if !clicked.is_empty() {
-                    println!("  已点击：{clicked}");
-                    if clicked.contains("其他方式")
-                        || clicked.to_ascii_lowercase().contains("another way")
-                    {
-                        // A method chooser opened. Re-evaluate the page so the
-                        // email option can be picked on the next pass.
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        continue;
+                if mentions_email {
+                    code_requested = true;
+                } else {
+                    let clicked = click_texts(
+                        client,
+                        &[
+                            "尝试其他方式",
+                            "使用其他方式",
+                            "Try another way",
+                            "获取验证码",
+                            "发送验证码",
+                            "发送代码",
+                            "通过电子邮件发送",
+                            "电子邮件",
+                            "Send code",
+                            "Get a verification code",
+                            "Get code",
+                            "Email",
+                        ],
+                    )
+                    .await;
+                    if !clicked.is_empty() {
+                        println!("  已点击：{clicked}");
+                        if clicked.contains("其他方式")
+                            || clicked.to_ascii_lowercase().contains("another way")
+                        {
+                            // A method chooser opened. Re-evaluate the page so
+                            // the email option can be picked on the next pass.
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            continue;
+                        }
                     }
+                    code_requested = true;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
-                code_requested = true;
-                tokio::time::sleep(Duration::from_secs(2)).await;
             }
             match wait_for_new_code(
                 http,
@@ -1059,12 +1080,20 @@ async fn page_state(client: &CdpClient) -> Result<serde_json::Value, String> {
                         /验证码|verification code|enter code|one-time code/i.test((el.getAttribute('aria-label') || '') + ' ' + (el.placeholder || ''))
                     )
                 );
+                const emailOption = Array.from(document.querySelectorAll('button, a, li, [role="button"], [role="link"], [role="menuitem"], [role="option"], div[jsname], div[jscontroller]')).some(el => {
+                    if (!visible(el)) return false;
+                    const label = (el.innerText || '').replace(/\s+/g, ' ').trim();
+                    return label.length > 0 && label.length < 120
+                        && /接收验证码|receive (a )?(verification )?code/i.test(label)
+                        && !/其他方式|another way/i.test(label);
+                });
                 return {
                     url: location.href,
                     text: ((document.body && document.body.innerText) || '').slice(0, 1600),
                     ident: visible(document.querySelector('#identifierId')),
                     pass: visible(document.querySelector('input[name="Passwd"]')),
-                    code: codeInput
+                    code: codeInput,
+                    emailOption
                 };
             })()"#,
         )
@@ -1240,6 +1269,71 @@ async fn click_account(client: &CdpClient, email: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Click the first email verification option on the account chooser page.
+///
+/// Google may list the same mailbox twice, for example a primary and a
+/// recovery mailbox. The first entry is used. The other-methods control is
+/// excluded so the method chooser is never reopened.
+async fn click_first_email_option(client: &CdpClient) -> bool {
+    let script = r#"(() => {
+        const shown = el => {
+            if (!el || !el.isConnected) return false;
+            const style = getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        };
+        for (const el of document.querySelectorAll('button, a, li, [role="button"], [role="link"], [role="menuitem"], [role="option"], div[jsname], div[jscontroller]')) {
+            if (!shown(el)) continue;
+            const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!text || text.length > 120) continue;
+            if (!/接收验证码|receive (a )?(verification )?code/i.test(text)) continue;
+            if (/其他方式|another way/i.test(text)) continue;
+            el.scrollIntoView({ block: 'center', inline: 'center' });
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 8 || rect.height < 8) continue;
+            return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        }
+        return null;
+    })()"#;
+    let value = match client.evaluate_js(script).await {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let (Some(x), Some(y)) = (
+        value.get("x").and_then(|value| value.as_f64()),
+        value.get("y").and_then(|value| value.as_f64()),
+    ) else {
+        return false;
+    };
+    mouse_click(client, x, y).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // When the option is still present after the mouse click, use a synthetic
+    // element click so the chooser still advances.
+    let fallback = r#"(() => {
+        const shown = el => {
+            if (!el || !el.isConnected) return false;
+            const style = getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        };
+        for (const el of document.querySelectorAll('button, a, li, [role="button"], [role="link"], [role="menuitem"], [role="option"], div[jsname], div[jscontroller]')) {
+            if (!shown(el)) continue;
+            const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!text || text.length > 120) continue;
+            if (!/接收验证码|receive (a )?(verification )?code/i.test(text)) continue;
+            if (/其他方式|another way/i.test(text)) continue;
+            el.click();
+            return true;
+        }
+        return false;
+    })()"#;
+    let _ = client.evaluate_js(fallback).await;
+    true
 }
 
 async fn mouse_click(client: &CdpClient, x: f64, y: f64) {
