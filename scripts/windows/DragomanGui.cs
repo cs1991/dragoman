@@ -139,15 +139,18 @@ internal sealed class DragomanGui : Form
     private void UpdateButtons()
     {
         var selected = Selected;
-        bool edit = !busy && server == null && !closing;
-        add.Enabled = batchLogin.Enabled = port.Enabled = strategy.Enabled = share.Enabled = edit;
-        remove.Enabled = toggle.Enabled = loginAgain.Enabled = setProxy.Enabled = edit && selected != null;
-        bulkProxy.Enabled = edit;
+        bool idle = !busy && !closing;
+        bool stopped = server == null;
+        // Account changes are hot reloaded by the running proxy, so only the
+        // listen settings stay locked while it is up.
+        add.Enabled = batchLogin.Enabled = bulkProxy.Enabled = idle;
+        port.Enabled = strategy.Enabled = share.Enabled = idle && stopped;
+        remove.Enabled = toggle.Enabled = loginAgain.Enabled = setProxy.Enabled = idle && selected != null;
         toggle.Text = selected != null && !selected.enabled ? "启用" : "停用";
-        start.Enabled = edit;
+        start.Enabled = idle && stopped;
         stop.Enabled = server != null && !busy && !closing;
         copy.Enabled = ready;
-        refresh.Enabled = !busy && !closing;
+        refresh.Enabled = idle;
         cancelLogin.Enabled = login != null && !closing;
         status.Text = server == null ? "● 已停止" : stopping ? "● 正在停止" : ready ? "● 运行中" : "● 正在启动";
         status.ForeColor = ready ? Color.SeaGreen : SystemColors.ControlText;
