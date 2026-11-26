@@ -103,7 +103,7 @@ scripts\package.cmd
 
 Open `dist\dragoman-windows\DragomanGui.exe`. Keep `dragoman.exe` beside it in a writable directory. Add an account by entering a local alias. Chrome opens one window and Dragoman watches that window for the whole sign-in. The session is read and saved the moment the Google cookies appear, so the account lands in the table while Chrome stays open. DevTools is attached only after the sign-in cookies exist, which keeps the login page clear of an active debugger. Each desktop account has its own Chrome profile under `desktop-profiles` beside the executables. For example, `work` uses `desktop-profiles\account-work.profile`. Keep the profile directories private. The desktop list also shows existing CLI and legacy sessions.
 
-Use the account table to sign in again, enable, disable, or delete a saved proxy session. Deletion retains the Chrome profile. Stop the proxy before changing accounts. If you also run `dragoman serve` separately, stop that instance before changing its sessions.
+Use the account table to sign in again, enable, disable, or delete a saved proxy session. Deletion retains the Chrome profile. The running proxy reloads the account directory every 3 seconds, so these changes take effect without a restart. A manual sign-in also clears that account's abnormal mark. An account marked `异常待复查` in the status column failed five account-level turns in a row and is out of rotation until it is signed in again.
 
 Use **启动** to start the local proxy and **复制 API 地址** to copy its base URL. The desktop proxy listens on `127.0.0.1` only. Closing the app stops the proxy it started. The existing CLI remains available for headless use.
 
@@ -204,7 +204,7 @@ dragoman desktop-accounts set-proxy --id=named:acc01 --proxy=http://127.0.0.1:78
 dragoman desktop-accounts set-proxy --id=named:acc01 --proxy=
 ```
 
-`assign-proxies` orders accounts by name. `--start-ip=2 --per-ip=1` gives account 1 `127.0.0.2`, account 2 `127.0.0.3` and so on, all through 7897. `--per-ip=5` puts five consecutive accounts on one source address and one node. `set-proxy` with an empty value clears the route and returns the account to the Windows system proxy.
+`assign-proxies` orders accounts by name. `--start-ip=2 --per-ip=1` gives account 1 `127.0.0.2`, account 2 `127.0.0.3` and so on, all through 7897. `--per-ip=5` puts five consecutive accounts on one source address and one node. `set-proxy` with an empty value clears the route and returns the account to the Windows system proxy. A running proxy notices the changed session file within 3 seconds and rebuilds that account's HTTP client with the new route.
 
 ### Why the client disables the system proxy
 
@@ -388,6 +388,10 @@ The Windows desktop app has a `批量登录` button next to `新增账号`. It a
 
 `--balance round-robin` rotates accounts in file order. `--balance least-used` picks the account with the fewest completed turns. An account that is already serving a turn is skipped when another account is free, so two clients can run in parallel on different accounts.
 
+An account that fails five account-level turns in a row is marked abnormal and removed from rotation until someone reviews it. Auth, quota, transport and stalled-context failures count. A parked model does not count because that is an upstream capacity signal. The mark is stored in `~/.config/dragoman/account-health.json`, survives a restart and appears as `state: abnormal` in `GET /v1/accounts` and in `dragoman accounts`. Sign in again to repair the account, or clear the mark with `dragoman accounts --clear NAME`. Pass `--clear-all` to clear every mark.
+
+`serve` watches the sessions directory and the health file. Adding a session, signing in again, enabling, disabling, deleting an account, changing its proxy, or clearing a mark takes effect within 3 seconds without a restart. Each account still serves one turn at a time, so 50 accounts allow up to 50 concurrent turns.
+
 `GET /v1/accounts` returns the live pool state.
 
 ```json
@@ -395,13 +399,14 @@ The Windows desktop app has a `批量登录` button next to `新增账号`. It a
   "strategy": "round-robin",
   "total_served": 12,
   "accounts": [
-    {"name": "work", "model": "Argon4p0", "has_conversation": true, "served": 7, "failures": 0, "cooldown_seconds": 0, "last_error": null},
-    {"name": "backup", "model": "Argon4p0", "has_conversation": false, "served": 5, "failures": 1, "cooldown_seconds": 24, "last_error": "transient: The connection failed."}
+    {"name": "work", "model": "Argon4p0", "has_conversation": true, "served": 7, "failures": 0, "consecutive_failures": 0, "cooldown_seconds": 0, "state": "ok", "last_error": null, "abnormal": null},
+    {"name": "backup", "model": "Argon4p0", "has_conversation": false, "served": 5, "failures": 1, "consecutive_failures": 1, "cooldown_seconds": 24, "state": "cooling", "last_error": "transient: The connection failed.", "abnormal": null},
+    {"name": "spare", "model": "Argon4p0", "has_conversation": false, "served": 2, "failures": 5, "consecutive_failures": 5, "cooldown_seconds": 0, "state": "abnormal", "last_error": "auth: HTTP 401", "abnormal": {"reason": "consecutive_failures>=5", "kind": "auth", "error": "HTTP 401", "since": 1764117000, "consecutive_failures": 5}}
   ]
 }
 ```
 
-`dragoman accounts` prints the configured accounts, their model, served count and cooldown state. Counters live in the running process, so a freshly started CLI shows zero.
+`dragoman accounts` prints the configured accounts with served count, failure streak, state and cooldown. Abnormal marks load from the health file. Served and failure counters live in the running process, so a freshly started CLI shows zero.
 
 Each account keeps its own Gemini conversation context. A conversation that stalls is cleared and retried once before the account is parked.
 

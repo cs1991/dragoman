@@ -108,7 +108,14 @@ enum Commands {
         dry_run: bool,
     },
     /// List configured accounts and their rotation state
-    Accounts,
+    Accounts {
+        /// Clear the abnormal mark for one account name
+        #[arg(long)]
+        clear: Option<String>,
+        /// Clear every abnormal mark
+        #[arg(long)]
+        clear_all: bool,
+    },
     #[command(hide = true)]
     DesktopAccounts {
         #[command(subcommand)]
@@ -214,7 +221,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pool.len(),
                 SessionData::config_dir().display()
             );
-            let web_client = Arc::new(GeminiWebClient::with_pool(Arc::new(pool)));
+            let pool = Arc::new(pool);
+            pool.spawn_watcher(std::time::Duration::from_secs(3));
+            let web_client = Arc::new(GeminiWebClient::with_pool(pool.clone()));
             let app_state = Arc::new(AppState {
                 web_client,
                 default_model: model,
@@ -311,6 +320,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session
                     .save()
                     .map_err(|_| "保存会话失败。请检查配置目录权限。")?;
+                let health_name = id.strip_prefix("named:").unwrap_or("default");
+                if dragoman::accounts::clear_account_health(health_name) {
+                    println!("已清除该账号的异常标记。");
+                }
                 println!("SUCCESS: 账号已保存，Chrome 窗口保持打开。");
                 return Ok(());
             }
@@ -348,6 +361,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 session.proxy = Some(value);
             }
             session.save()?;
+            if dragoman::accounts::clear_account_health(&account) {
+                println!("已清除该账号的异常标记。");
+            }
             println!(
                 "\nSUCCESS: Saved authentication session to {}",
                 session_path.display()
@@ -460,7 +476,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Accounts => {
+        Commands::Accounts { clear, clear_all } => {
             let pool = match AccountPool::load(BalanceStrategy::RoundRobin) {
                 Ok(pool) => pool,
                 Err(error) => {
@@ -468,24 +484,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             };
+            if let Some(name) = clear {
+                if let Err(error) = pool.clear_abnormal(&name) {
+                    eprintln!("Error: {}", error);
+                    std::process::exit(1);
+                }
+                println!("Cleared abnormal mark for {}", name);
+            }
+            if clear_all {
+                println!("Cleared {} abnormal mark(s)", pool.clear_all_abnormal());
+            }
             let status = pool.status().await;
             println!("Config directory: {}", SessionData::config_dir().display());
             println!("Strategy: {}", status.strategy);
             println!("Total served: {}", status.total_served);
             println!();
             println!(
-                "{:<20} {:<16} {:<22} {:<12} {:>7} {:>6} {:>9}  LAST ERROR",
-                "NAME", "MODEL", "PROXY", "LOCAL IP", "SERVED", "FAILS", "COOLDOWN"
+                "{:<20} {:<16} {:<22} {:<12} {:>7} {:>6} {:>6} {:<9} {:>9}  LAST ERROR",
+                "NAME",
+                "MODEL",
+                "PROXY",
+                "LOCAL IP",
+                "SERVED",
+                "FAILS",
+                "STREAK",
+                "STATE",
+                "COOLDOWN"
             );
             for account in &status.accounts {
                 println!(
-                    "{:<20} {:<16} {:<22} {:<12} {:>7} {:>6} {:>8}s  {}",
+                    "{:<20} {:<16} {:<22} {:<12} {:>7} {:>6} {:>6} {:<9} {:>8}s  {}",
                     account.name,
                     account.model,
                     account.proxy.as_deref().unwrap_or("-"),
                     account.local_ip.as_deref().unwrap_or("-"),
                     account.served,
                     account.failures,
+                    account.consecutive_failures,
+                    account.state,
                     account.cooldown_seconds,
                     account.last_error.as_deref().unwrap_or("-")
                 );

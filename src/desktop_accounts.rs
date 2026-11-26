@@ -1,4 +1,7 @@
-use crate::{accounts::file_name_for_account, session::SessionData};
+use crate::{
+    accounts::{HealthStore, file_name_for_account},
+    session::SessionData,
+};
 use serde::Serialize;
 use std::{
     fs, io,
@@ -13,6 +16,7 @@ pub struct SavedAccount {
     model: Option<String>,
     proxy: Option<String>,
     local_ip: Option<String>,
+    abnormal: Option<String>,
     #[serde(skip)]
     path: PathBuf,
 }
@@ -72,6 +76,7 @@ impl AccountStore {
 
     pub fn list(&self) -> Result<Vec<SavedAccount>, String> {
         let mut accounts = Vec::new();
+        let health = HealthStore::load(self.root.join("account-health.json")).snapshot();
         for enabled in [true, false] {
             let path = self.path("legacy", enabled)?;
             if path.is_file() {
@@ -80,6 +85,7 @@ impl AccountStore {
                     "default (旧版)".into(),
                     enabled,
                     &path,
+                    health.get("default").map(|state| state.summary()),
                 ));
             }
         }
@@ -117,7 +123,13 @@ impl AccountStore {
                         }
                     })
                 }) {
-                    accounts.push(Self::entry(id, name.into(), enabled, &file.path()));
+                    accounts.push(Self::entry(
+                        id,
+                        name.into(),
+                        enabled,
+                        &file.path(),
+                        health.get(name).map(|state| state.summary()),
+                    ));
                 }
             }
         }
@@ -125,7 +137,13 @@ impl AccountStore {
         Ok(accounts)
     }
 
-    fn entry(id: String, name: String, enabled: bool, path: &Path) -> SavedAccount {
+    fn entry(
+        id: String,
+        name: String,
+        enabled: bool,
+        path: &Path,
+        abnormal: Option<String>,
+    ) -> SavedAccount {
         let session = SessionData::load_from(path)
             .ok()
             .filter(|session| !session.cookie.is_empty() && !session.snlm0e.is_empty());
@@ -136,6 +154,7 @@ impl AccountStore {
             model: session.as_ref().map(|session| session.model.clone()),
             proxy: session.as_ref().and_then(|session| session.proxy.clone()),
             local_ip: session.and_then(|session| session.local_ip),
+            abnormal,
             path: path.to_path_buf(),
         }
     }

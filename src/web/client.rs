@@ -110,6 +110,19 @@ fn transport_error(action: &str, error: &reqwest::Error) -> String {
     format!("{action}: {detail}")
 }
 
+/// Message used when every account is parked or cooling down.
+///
+/// Retrying an abnormal account only burns one more failure, so the caller gets
+/// one actionable sentence instead.
+fn no_healthy_account_message(pool: &AccountPool) -> String {
+    if pool.is_empty() {
+        "No Gemini account is loaded right now. Sign in one; the proxy picks it up automatically."
+            .to_string()
+    } else {
+        "No Gemini account is available right now. Every account is cooling down or marked abnormal. Sign in again to repair one, or clear its mark with 'dragoman accounts --clear NAME'.".to_string()
+    }
+}
+
 impl GeminiWebClient {
     pub fn new(session: SessionData) -> Self {
         Self::with_pool(Arc::new(AccountPool::single(session)))
@@ -124,14 +137,13 @@ impl GeminiWebClient {
     }
 
     pub fn session(&self) -> Option<Arc<Mutex<SessionData>>> {
-        self.pool
-            .accounts()
-            .first()
-            .map(|account| account.session.clone())
+        let accounts = self.pool.accounts();
+        accounts.first().map(|account| account.session.clone())
     }
 
     pub async fn current_session(&self) -> Option<SessionData> {
-        match self.pool.accounts().first() {
+        let accounts = self.pool.accounts();
+        match accounts.first() {
             Some(account) => Some(account.session.lock().await.clone()),
             None => None,
         }
@@ -358,7 +370,11 @@ impl GeminiWebClient {
         model: ModelSpec,
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
-        let lease = self.pool.lease().await;
+        let Some(lease) = self.pool.lease().await else {
+            let message = no_healthy_account_message(&self.pool);
+            let _ = delta_tx.send(Err(message.clone())).await;
+            return Err(message);
+        };
         let account = lease.account.clone();
         let result = self
             .run_turn(&account, prompt, files, model, delta_tx.clone())
@@ -411,7 +427,10 @@ impl GeminiWebClient {
         let mut tried: Vec<String> = Vec::new();
 
         for attempt in 0..attempt_cap {
-            let lease = self.pool.lease().await;
+            let Some(lease) = self.pool.lease().await else {
+                last_error = no_healthy_account_message(&self.pool);
+                break;
+            };
             let account = lease.account.clone();
             if tried.contains(&account.name) && tried.len() >= self.pool.len() {
                 drop(lease);
@@ -868,7 +887,8 @@ impl GeminiWebClient {
         media: &MediaAttachment,
         max_bytes: u64,
     ) -> Result<UploadedFile, UploadError> {
-        let Some(account) = self.pool.accounts().first() else {
+        let accounts = self.pool.accounts();
+        let Some(account) = accounts.first() else {
             return Err(UploadError::Invalid(
                 "No Gemini account is configured".to_string(),
             ));

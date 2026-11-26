@@ -21,6 +21,7 @@ internal sealed class DragomanGui : Form
         public string model { get; set; }
         public string proxy { get; set; }
         public string local_ip { get; set; }
+        public string abnormal { get; set; }
     }
 
     private readonly string executable = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "dragoman.exe");
@@ -112,7 +113,7 @@ internal sealed class DragomanGui : Form
         Shown += async (s, e) => await Run(RefreshAccounts);
         FormClosing += OnClosing;
         UpdateButtons();
-        message.Text = "账号更改前请停止代理。登录成功后账号自动添加，Chrome 窗口保持打开。";
+        message.Text = "账号和代理更改会在几秒内自动生效，无需停止代理。登录成功后账号自动添加，Chrome 窗口保持打开。";
     }
 
     private static FlowLayoutPanel Bar(TableLayoutPanel layout, int row)
@@ -223,7 +224,10 @@ internal sealed class DragomanGui : Form
         foreach (var account in entries)
         {
             var row = new ListViewItem(account.name) { Tag = account };
-            row.SubItems.Add((account.enabled ? "已启用" : "已停用") + (account.model == null ? " / 需登录" : ""));
+            var rowState = account.enabled ? "已启用" : "已停用";
+            if (!String.IsNullOrEmpty(account.abnormal)) rowState += " / 异常待复查";
+            else if (account.model == null) rowState += " / 需登录";
+            row.SubItems.Add(rowState);
             row.SubItems.Add(account.model ?? "—");
             var route = String.IsNullOrEmpty(account.proxy) ? "系统" : account.proxy;
             if (!String.IsNullOrEmpty(account.local_ip)) route += "  @ " + account.local_ip;
