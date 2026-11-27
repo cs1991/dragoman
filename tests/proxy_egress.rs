@@ -15,6 +15,7 @@ fn session(proxy: Option<String>, local_ip: Option<String>) -> SessionData {
         base_url: None,
         proxy,
         local_ip,
+        tier: dragoman::session::AccountTier::Pro,
         path: None,
     }
 }

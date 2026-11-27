@@ -1080,10 +1080,12 @@ async fn capture_session(
         base_url: None,
         proxy: None,
         local_ip: None,
+        tier: crate::session::AccountTier::default(),
         path: Some(path.clone()),
     };
     if let Ok(previous) = SessionData::load_from(&path) {
         session.local_ip = previous.local_ip;
+        session.tier = previous.tier;
         if options.proxy.is_none() {
             session.proxy = previous.proxy;
         }

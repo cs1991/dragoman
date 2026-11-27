@@ -1,4 +1,5 @@
-use crate::session::SessionData;
+use crate::session::{AccountTier, SessionData};
+use crate::settings::ProxySettings;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,16 @@ use tokio::sync::{Mutex, OwnedMutexGuard};
 /// successful sign-in for the same account name, or an explicit clear, removes
 /// the mark.
 pub const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
+/// What a request needs from an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestKind {
+    /// Text, image and file requests. Reaches `pro` accounts, plus `free`
+    /// accounts when the global free-chat switch is on.
+    Chat,
+    /// Video analysis. Every tier can serve it.
+    Video,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
@@ -265,6 +276,7 @@ struct SessionFingerprint {
     proxy: Option<String>,
     local_ip: Option<String>,
     base_url: Option<String>,
+    tier: AccountTier,
 }
 
 impl SessionFingerprint {
@@ -277,6 +289,7 @@ impl SessionFingerprint {
             proxy: session.proxy.clone(),
             local_ip: session.local_ip.clone(),
             base_url: session.base_url.clone(),
+            tier: session.tier,
         }
     }
 
@@ -300,6 +313,7 @@ pub struct Account {
     runtime: StdMutex<AccountRuntime>,
     health: Arc<HealthStore>,
     fingerprint: SessionFingerprint,
+    tier: AccountTier,
 }
 
 impl Account {
@@ -315,6 +329,7 @@ impl Account {
     ) -> Self {
         let http = build_http_client(&session);
         let fingerprint = SessionFingerprint::from_session(&session);
+        let tier = session.tier;
         let mut runtime = AccountRuntime::default();
         if let Some(state) = abnormal {
             runtime.consecutive_failures = state.consecutive_failures;
@@ -328,6 +343,19 @@ impl Account {
             runtime: StdMutex::new(runtime),
             health,
             fingerprint,
+            tier,
+        }
+    }
+
+    pub fn tier(&self) -> AccountTier {
+        self.tier
+    }
+
+    /// Whether this account may handle the request.
+    pub fn supports(&self, kind: RequestKind, allow_free_chat: bool) -> bool {
+        match kind {
+            RequestKind::Video => true,
+            RequestKind::Chat => self.tier == AccountTier::Pro || allow_free_chat,
         }
     }
 
@@ -504,6 +532,7 @@ impl Account {
         };
         AccountStatus {
             name: self.name.clone(),
+            tier: self.tier.label().to_string(),
             model,
             proxy,
             local_ip,
@@ -522,6 +551,7 @@ impl Account {
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountStatus {
     pub name: String,
+    pub tier: String,
     pub model: String,
     pub proxy: Option<String>,
     pub local_ip: Option<String>,
@@ -570,6 +600,7 @@ pub struct AccountPool {
     strategy: BalanceStrategy,
     cursor: AtomicUsize,
     total_served: AtomicU64,
+    allow_free_chat: std::sync::atomic::AtomicBool,
     health: Arc<HealthStore>,
     watch: Option<WatchPaths>,
     signature: StdMutex<Option<DirSignature>>,
@@ -597,6 +628,7 @@ impl AccountPool {
             strategy,
             cursor: AtomicUsize::new(0),
             total_served: AtomicU64::new(0),
+            allow_free_chat: std::sync::atomic::AtomicBool::new(false),
             health,
             watch: None,
             signature: StdMutex::new(None),
@@ -610,6 +642,7 @@ impl AccountPool {
             strategy: BalanceStrategy::RoundRobin,
             cursor: AtomicUsize::new(0),
             total_served: AtomicU64::new(0),
+            allow_free_chat: std::sync::atomic::AtomicBool::new(false),
             health: HealthStore::ephemeral(),
             watch: None,
             signature: StdMutex::new(None),
@@ -672,11 +705,13 @@ impl AccountPool {
             })
             .collect();
         let signature = signature_of(&sessions_dir, legacy.as_deref(), Some(&health_file));
+        let allow_free_chat = ProxySettings::load().allow_free_chat;
         Ok(Self {
             accounts: RwLock::new(accounts),
             strategy,
             cursor: AtomicUsize::new(0),
             total_served: AtomicU64::new(0),
+            allow_free_chat: std::sync::atomic::AtomicBool::new(allow_free_chat),
             health,
             watch: Some(WatchPaths {
                 sessions_dir,
@@ -766,6 +801,7 @@ impl AccountPool {
     }
 
     fn reload_now(&self, watch: &WatchPaths) -> Option<PoolReload> {
+        self.refresh_settings();
         let signature = signature_of(
             &watch.sessions_dir,
             watch.legacy.as_deref(),
@@ -860,6 +896,22 @@ impl AccountPool {
         })
     }
 
+    /// Re-read the global switches. Called inside the throttled reload so a GUI
+    /// change takes effect without restarting the server.
+    fn refresh_settings(&self) {
+        let settings = ProxySettings::load();
+        self.allow_free_chat
+            .store(settings.allow_free_chat, Ordering::Relaxed);
+    }
+
+    pub fn allow_free_chat(&self) -> bool {
+        self.allow_free_chat.load(Ordering::Relaxed)
+    }
+
+    pub fn set_allow_free_chat(&self, allow: bool) {
+        self.allow_free_chat.store(allow, Ordering::Relaxed);
+    }
+
     /// Poll the sessions directory in the background. Accounts added, replaced,
     /// disabled or removed by another process take effect within one interval
     /// without restarting the proxy.
@@ -911,8 +963,18 @@ impl AccountPool {
     /// marked abnormal, so the caller can answer with a clear error instead of
     /// burning a broken account.
     pub async fn lease(&self) -> Option<Lease> {
+        self.lease_for(RequestKind::Chat).await
+    }
+
+    /// Reserve one account that is allowed to serve `kind`.
+    ///
+    /// Video analysis accepts both tiers. Chat accepts `pro` accounts and, when
+    /// the global switch is on, `free` accounts too.
+    pub async fn lease_for(&self, kind: RequestKind) -> Option<Lease> {
         self.reload_if_changed_throttled();
         let accounts = self.accounts();
+        let allow_free_chat = self.allow_free_chat();
+        let eligible = |account: &Arc<Account>| account.supports(kind, allow_free_chat);
         let len = accounts.len();
         if len == 0 {
             return None;
@@ -922,7 +984,7 @@ impl AccountPool {
         for offset in 0..len {
             let index = (start + offset) % len;
             let account = &accounts[index];
-            if !account.is_available() {
+            if !eligible(account) || !account.is_available() {
                 continue;
             }
             if let Ok(guard) = account.turn.clone().try_lock_owned() {
@@ -936,7 +998,7 @@ impl AccountPool {
         for offset in 0..len {
             let index = (start + offset) % len;
             let account = &accounts[index];
-            if account.is_available() {
+            if eligible(account) && account.is_available() {
                 let guard = account.turn.clone().lock_owned().await;
                 return Some(Lease {
                     account: account.clone(),
@@ -946,7 +1008,7 @@ impl AccountPool {
         }
 
         let index = (0..len)
-            .filter(|index| !accounts[*index].is_abnormal())
+            .filter(|index| eligible(&accounts[*index]) && !accounts[*index].is_abnormal())
             .min_by_key(|index| {
                 accounts[*index]
                     .cooldown_remaining()

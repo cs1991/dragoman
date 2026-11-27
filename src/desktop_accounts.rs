@@ -1,6 +1,6 @@
 use crate::{
     accounts::{HealthStore, file_name_for_account},
-    session::SessionData,
+    session::{AccountTier, SessionData},
 };
 use serde::Serialize;
 use std::{
@@ -14,6 +14,7 @@ pub struct SavedAccount {
     name: String,
     enabled: bool,
     model: Option<String>,
+    tier: String,
     proxy: Option<String>,
     local_ip: Option<String>,
     abnormal: Option<String>,
@@ -152,11 +153,24 @@ impl AccountStore {
             name,
             enabled,
             model: session.as_ref().map(|session| session.model.clone()),
+            tier: session
+                .as_ref()
+                .map(|session| session.tier.label().to_string())
+                .unwrap_or_else(|| AccountTier::Pro.label().to_string()),
             proxy: session.as_ref().and_then(|session| session.proxy.clone()),
             local_ip: session.and_then(|session| session.local_ip),
             abnormal,
             path: path.to_path_buf(),
         }
+    }
+
+    /// Change the tier of one saved account. The running pool picks the new
+    /// value up on its next reload tick.
+    pub fn set_tier(&self, id: &str, tier: AccountTier) -> Result<(), String> {
+        let path = self.login_path(id)?;
+        let mut session = SessionData::load_from(&path)?;
+        session.tier = tier;
+        session.save()
     }
 
     /// Set or clear the egress proxy and source address of one saved account.

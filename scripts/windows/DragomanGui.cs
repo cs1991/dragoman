@@ -19,9 +19,15 @@ internal sealed class DragomanGui : Form
         public string name { get; set; }
         public bool enabled { get; set; }
         public string model { get; set; }
+        public string tier { get; set; }
         public string proxy { get; set; }
         public string local_ip { get; set; }
         public string abnormal { get; set; }
+    }
+
+    public sealed class Settings
+    {
+        public bool allow_free_chat { get; set; }
     }
 
     private readonly string executable = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "dragoman.exe");
@@ -31,9 +37,10 @@ internal sealed class DragomanGui : Form
     private readonly NumericUpDown port = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = 8080, Width = 78 };
     private readonly NumericUpDown share = new NumericUpDown { Minimum = 1, Maximum = 100, Value = 1, Width = 52 };
     private readonly ComboBox strategy = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
-    private readonly Button start, stop, copy, add, batchLogin, loginAgain, toggle, remove, setProxy, bulkProxy, refresh, cancelLogin;
+    private readonly CheckBox allowFreeChat = new CheckBox { Text = "Free 号可对话", AutoSize = true, Margin = new Padding(10, 6, 3, 0) };
+    private readonly Button start, stop, copy, add, batchLogin, loginAgain, toggle, remove, setProxy, bulkProxy, setPro, setFree, refresh, cancelLogin;
     private Process server, login;
-    private bool busy, ready, closing, stopping, loginCanceled;
+    private bool busy, ready, closing, stopping, loginCanceled, loadingSettings;
     private Account Selected { get { return accounts.SelectedItems.Count == 0 ? null : (Account)accounts.SelectedItems[0].Tag; } }
     private string Endpoint { get { return "http://127.0.0.1:" + port.Value + "/v1"; } }
 
@@ -84,6 +91,8 @@ internal sealed class DragomanGui : Form
         start = Button(serverBar, "启动", async () => await Run(StartProxy));
         stop = Button(serverBar, "停止", async () => await Run(StopProxy));
         copy = Button(serverBar, "复制 API 地址", CopyEndpoint);
+        allowFreeChat.CheckedChanged += async (s, e) => await Run(SaveFreeChatSwitch);
+        serverBar.Controls.Add(allowFreeChat);
         status.Margin = new Padding(10, 7, 0, 0);
         serverBar.Controls.Add(status);
 
@@ -95,6 +104,7 @@ internal sealed class DragomanGui : Form
         accounts.HideSelection = false;
         accounts.Columns.Add("账号", 210);
         accounts.Columns.Add("状态", 130);
+        accounts.Columns.Add("类型", 70);
         accounts.Columns.Add("模型", 150);
         accounts.Columns.Add("代理", 300);
         accounts.SelectedIndexChanged += (s, e) => UpdateButtons();
@@ -105,11 +115,14 @@ internal sealed class DragomanGui : Form
         loginAgain = Button(accountBar, "重新登录", async () => await Run(() => LogIn(Selected.id, Selected.proxy)));
         setProxy = Button(accountBar, "设置代理", async () => await Run(EditProxy));
         bulkProxy = Button(accountBar, "批量分配代理", async () => await Run(AssignProxies));
+        setPro = Button(accountBar, "设为 Pro", async () => await Run(() => SetTier("pro")));
+        setFree = Button(accountBar, "设为 Free", async () => await Run(() => SetTier("free")));
         toggle = Button(accountBar, "停用", async () => await Run(ToggleAccount));
         remove = Button(accountBar, "删除", async () => await Run(RemoveAccount));
         refresh = Button(accountBar, "刷新列表", async () => await Run(RefreshAccounts));
         cancelLogin = Button(accountBar, "取消登录", () => { loginCanceled = true; TryKill(login); });
         layout.Controls.Add(message, 0, 5);
+        Shown += async (s, e) => await Run(LoadSettings);
         Shown += async (s, e) => await Run(RefreshAccounts);
         FormClosing += OnClosing;
         UpdateButtons();
@@ -146,6 +159,7 @@ internal sealed class DragomanGui : Form
         add.Enabled = batchLogin.Enabled = bulkProxy.Enabled = idle;
         port.Enabled = strategy.Enabled = share.Enabled = idle && stopped;
         remove.Enabled = toggle.Enabled = loginAgain.Enabled = setProxy.Enabled = idle && selected != null;
+        setPro.Enabled = setFree.Enabled = idle && selected != null;
         toggle.Text = selected != null && !selected.enabled ? "启用" : "停用";
         start.Enabled = idle && stopped;
         stop.Enabled = server != null && !busy && !closing;
@@ -218,6 +232,12 @@ internal sealed class DragomanGui : Form
             return await ReadResult(child, "账号操作失败。请刷新列表，或检查配置目录权限。");
     }
 
+    private async Task<string> ManageSettings(string arguments)
+    {
+        using (var child = Spawn("desktop-settings " + arguments))
+            return await ReadResult(child, "设置保存失败。请检查配置目录权限。");
+    }
+
     private async Task RefreshAccounts()
     {
         var entries = new JavaScriptSerializer().Deserialize<Account[]>(await Manage("list"));
@@ -231,6 +251,7 @@ internal sealed class DragomanGui : Form
             if (!String.IsNullOrEmpty(account.abnormal)) rowState += " / 异常待复查";
             else if (account.model == null) rowState += " / 需登录";
             row.SubItems.Add(rowState);
+            row.SubItems.Add(String.IsNullOrEmpty(account.tier) ? "pro" : account.tier);
             row.SubItems.Add(account.model ?? "—");
             var route = String.IsNullOrEmpty(account.proxy) ? "系统" : account.proxy;
             if (!String.IsNullOrEmpty(account.local_ip)) route += "  @ " + account.local_ip;
@@ -591,6 +612,32 @@ internal sealed class DragomanGui : Form
         await Manage((account.enabled ? "disable" : "enable") + " --id=" + AccountArg(account.id));
         await RefreshAccounts();
         message.Text = account.enabled ? "账号已停用。" : "账号已启用。";
+    }
+
+    private async Task SetTier(string tier)
+    {
+        var account = Selected;
+        await Manage("set-tier --id=" + AccountArg(account.id) + " --tier=" + tier);
+        await RefreshAccounts();
+        message.Text = "「" + account.name + "」已设为 " + tier + "。正在运行的代理会在几秒内生效。";
+    }
+
+    private async Task LoadSettings()
+    {
+        var settings = new JavaScriptSerializer().Deserialize<Settings>(await ManageSettings(""));
+        loadingSettings = true;
+        allowFreeChat.Checked = settings.allow_free_chat;
+        loadingSettings = false;
+    }
+
+    private async Task SaveFreeChatSwitch()
+    {
+        if (loadingSettings) return;
+        var allow = allowFreeChat.Checked;
+        await ManageSettings("--allow-free-chat " + (allow ? "true" : "false"));
+        message.Text = allow
+            ? "已允许 Free 账号参与对话，正在运行的代理几秒内生效。"
+            : "Free 账号只做视频分析，正在运行的代理几秒内生效。";
     }
 
     private async Task RemoveAccount()

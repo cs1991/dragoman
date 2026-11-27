@@ -161,6 +161,7 @@ async fn test_multi_turn_session_chaining_simulation() {
         base_url: None,
         proxy: None,
         local_ip: None,
+        tier: dragoman::session::AccountTier::Pro,
         path: None,
     };
 
@@ -271,6 +272,7 @@ fn test_session_serialization_backward_compatibility() {
         base_url: None,
         proxy: None,
         local_ip: None,
+        tier: dragoman::session::AccountTier::Pro,
         path: None,
     };
 

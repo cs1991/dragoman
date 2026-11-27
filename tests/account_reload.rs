@@ -25,6 +25,7 @@ fn write_session(root: &Path, name: &str, cookie: &str) {
         base_url: None,
         proxy: None,
         local_ip: None,
+        tier: dragoman::session::AccountTier::Pro,
         path: Some(path),
     };
     session.save().unwrap();

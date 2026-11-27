@@ -21,6 +21,7 @@ use crate::proxy::translator::PromptTranslator;
 use crate::web::GeminiWebClient;
 use crate::web::models;
 use crate::web::models::CONTEXT_WINDOW;
+use crate::accounts::RequestKind;
 
 pub struct AppState {
     pub web_client: Arc<GeminiWebClient>,
@@ -139,6 +140,12 @@ async fn chat_completions(
 
     let media = req.collect_media();
     info!("Request attachments: {}", media.len());
+    let kind = if media.iter().any(|item| item.kind == MediaKind::Video) {
+        RequestKind::Video
+    } else {
+        RequestKind::Chat
+    };
+    info!("Request kind: {:?}", kind);
 
     let mut prompt = PromptTranslator::build_gemini_prompt(&req);
     let has_user_text = req
@@ -199,6 +206,7 @@ async fn chat_completions(
                     &media_clone,
                     model,
                     max_attachment_bytes,
+                    kind,
                     delta_tx,
                 )
                 .await
@@ -330,6 +338,7 @@ async fn chat_completions(
                 &media,
                 model,
                 state.max_attachment_bytes,
+                kind,
                 delta_tx,
             )
             .await

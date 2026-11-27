@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tracing::info;
 
-use crate::accounts::{Account, AccountPool, BalanceStrategy, FailureKind};
+use crate::accounts::{Account, AccountPool, BalanceStrategy, FailureKind, RequestKind};
 use crate::openai::types::MediaAttachment;
 use crate::session::SessionData;
 use crate::web::models::{self, ModelSpec};
@@ -128,10 +128,18 @@ fn transport_error(action: &str, error: &reqwest::Error) -> String {
 ///
 /// Retrying an abnormal account only burns one more failure, so the caller gets
 /// one actionable sentence instead.
-fn no_healthy_account_message(pool: &AccountPool) -> String {
+fn no_healthy_account_message(pool: &AccountPool, kind: RequestKind) -> String {
     if pool.is_empty() {
         "No Gemini account is loaded right now. Sign in one; the proxy picks it up automatically."
             .to_string()
+    } else if kind == RequestKind::Chat
+        && !pool.allow_free_chat()
+        && pool
+            .accounts()
+            .iter()
+            .all(|account| account.tier() == crate::session::AccountTier::Free)
+    {
+        "Every loaded account is a free account and free chat is off. Mark one account as pro or enable allow-free-chat in the GUI.".to_string()
     } else {
         "No Gemini account is available right now. Every account is cooling down or marked abnormal. Sign in again to repair one, or clear its mark with 'dragoman accounts --clear NAME'.".to_string()
     }
@@ -373,8 +381,14 @@ impl GeminiWebClient {
         files: &[UploadedFile],
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
-        self.send_prompt_stream_with_model(prompt, files, models::default_model(), delta_tx)
-            .await
+        self.send_prompt_stream_with_model(
+            prompt,
+            files,
+            models::default_model(),
+            RequestKind::Chat,
+            delta_tx,
+        )
+        .await
     }
 
     pub async fn send_prompt_stream_with_model(
@@ -382,10 +396,11 @@ impl GeminiWebClient {
         prompt: &str,
         files: &[UploadedFile],
         model: ModelSpec,
+        kind: RequestKind,
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
-        let Some(lease) = self.pool.lease().await else {
-            let message = no_healthy_account_message(&self.pool);
+        let Some(lease) = self.pool.lease_for(kind).await else {
+            let message = no_healthy_account_message(&self.pool, kind);
             let _ = delta_tx.send(Err(message.clone())).await;
             return Err(message);
         };
@@ -416,6 +431,7 @@ impl GeminiWebClient {
         prompt: &str,
         media: &[MediaAttachment],
         max_attachment_bytes: u64,
+        kind: RequestKind,
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
         self.send_prompt_stream_with_media_and_model(
@@ -423,6 +439,7 @@ impl GeminiWebClient {
             media,
             models::default_model(),
             max_attachment_bytes,
+            kind,
             delta_tx,
         )
         .await
@@ -434,6 +451,7 @@ impl GeminiWebClient {
         media: &[MediaAttachment],
         model: ModelSpec,
         max_attachment_bytes: u64,
+        kind: RequestKind,
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
         let attempt_cap = (self.pool.len().saturating_mul(2)).clamp(1, 4);
@@ -441,8 +459,8 @@ impl GeminiWebClient {
         let mut tried: Vec<String> = Vec::new();
 
         for attempt in 0..attempt_cap {
-            let Some(lease) = self.pool.lease().await else {
-                last_error = no_healthy_account_message(&self.pool);
+            let Some(lease) = self.pool.lease_for(kind).await else {
+                last_error = no_healthy_account_message(&self.pool, kind);
                 break;
             };
             let account = lease.account.clone();

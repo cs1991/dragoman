@@ -121,6 +121,13 @@ enum Commands {
         #[command(subcommand)]
         action: AccountAction,
     },
+    /// Read or change the global proxy switches
+    #[command(hide = true)]
+    DesktopSettings {
+        /// Allow free accounts to answer chat requests
+        #[arg(long)]
+        allow_free_chat: Option<bool>,
+    },
     /// Test direct native HTTP RPC without browser
     TestRpc {
         #[arg(default_value = "Say hello and confirm you are Gemini 4 Argon in 1 sentence.")]
@@ -165,6 +172,13 @@ enum AccountAction {
         /// Accounts that share one source address and one node.
         #[arg(long, default_value_t = 1)]
         per_ip: u16,
+    },
+    SetTier {
+        #[arg(long)]
+        id: String,
+        /// `pro` or `free`
+        #[arg(long)]
+        tier: String,
     },
 }
 
@@ -474,7 +488,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let assignments = store.assign_proxies(start_ip, proxy_port, per_ip)?;
                     println!("{}", serde_json::to_string(&assignments)?);
                 }
+                AccountAction::SetTier { id, tier } => {
+                    let tier = dragoman::session::AccountTier::parse(&tier)
+                        .ok_or("Tier must be pro or free")?;
+                    store.set_tier(&id, tier)?;
+                    println!("{}", serde_json::to_string(&store.list()?)?);
+                }
             }
+        }
+        Commands::DesktopSettings { allow_free_chat } => {
+            let mut settings = dragoman::settings::ProxySettings::load();
+            if let Some(allow) = allow_free_chat {
+                settings.allow_free_chat = allow;
+                settings.save()?;
+            }
+            println!("{}", serde_json::to_string(&settings)?);
         }
         Commands::Accounts { clear, clear_all } => {
             let pool = match AccountPool::load(BalanceStrategy::RoundRobin) {
@@ -497,11 +525,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let status = pool.status().await;
             println!("Config directory: {}", SessionData::config_dir().display());
             println!("Strategy: {}", status.strategy);
+            println!("Free chat: {}", pool.allow_free_chat());
             println!("Total served: {}", status.total_served);
             println!();
             println!(
-                "{:<20} {:<16} {:<22} {:<12} {:>7} {:>6} {:>6} {:<9} {:>9}  LAST ERROR",
+                "{:<20} {:<6} {:<16} {:<22} {:<12} {:>7} {:>6} {:>6} {:<9} {:>9}  LAST ERROR",
                 "NAME",
+                "TIER",
                 "MODEL",
                 "PROXY",
                 "LOCAL IP",
@@ -513,8 +543,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             for account in &status.accounts {
                 println!(
-                    "{:<20} {:<16} {:<22} {:<12} {:>7} {:>6} {:>6} {:<9} {:>8}s  {}",
+                    "{:<20} {:<6} {:<16} {:<22} {:<12} {:>7} {:>6} {:>6} {:<9} {:>8}s  {}",
                     account.name,
+                    account.tier,
                     account.model,
                     account.proxy.as_deref().unwrap_or("-"),
                     account.local_ip.as_deref().unwrap_or("-"),
@@ -766,6 +797,7 @@ async fn capture_session(
         base_url: None,
         proxy: None,
         local_ip: None,
+        tier: dragoman::session::AccountTier::Pro,
         path: Some(session_path),
     })
 }

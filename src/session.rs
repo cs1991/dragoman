@@ -1,6 +1,35 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// What an account is allowed to do.
+///
+/// `Pro` accounts answer chat requests and analyze media. `Free` accounts only
+/// analyze video unless the global free-chat switch is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AccountTier {
+    #[default]
+    Pro,
+    Free,
+}
+
+impl AccountTier {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "pro" | "plus" | "paid" => Some(Self::Pro),
+            "free" | "basic" => Some(Self::Free),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pro => "pro",
+            Self::Free => "free",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
     pub snlm0e: String,
@@ -34,6 +63,9 @@ pub struct SessionData {
     /// the fixed mixed port and still leave through different nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_ip: Option<String>,
+    /// Account tier set by the user. Older sessions default to `pro`.
+    #[serde(default)]
+    pub tier: AccountTier,
     /// File this session was loaded from. Local machine data, never serialized.
     #[serde(skip)]
     pub path: Option<PathBuf>,

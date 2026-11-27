@@ -1,5 +1,5 @@
-use dragoman::accounts::{AccountPool, BalanceStrategy, FailureKind};
-use dragoman::session::SessionData;
+use dragoman::accounts::{AccountPool, BalanceStrategy, FailureKind, RequestKind};
+use dragoman::session::{AccountTier, SessionData};
 use std::sync::Arc;
 
 fn session(cookie: &str) -> SessionData {
@@ -15,6 +15,7 @@ fn session(cookie: &str) -> SessionData {
         base_url: None,
         proxy: None,
         local_ip: None,
+        tier: dragoman::session::AccountTier::Pro,
         path: None,
     }
 }
@@ -211,4 +212,33 @@ async fn network_failures_do_not_park_the_account() {
     }
     assert_eq!(only.consecutive_failures(), 0);
     assert!(!only.is_abnormal());
+}
+
+#[tokio::test]
+async fn free_accounts_only_serve_video_until_the_switch_is_on() {
+    let mut free_session = session("c1");
+    free_session.tier = AccountTier::Free;
+    let pool = AccountPool::from_sessions(
+        vec![("free-one".to_string(), free_session)],
+        BalanceStrategy::RoundRobin,
+    )
+    .unwrap();
+
+    assert!(pool.lease_for(RequestKind::Chat).await.is_none());
+    let video = pool.lease_for(RequestKind::Video).await.expect("video allowed");
+    assert_eq!(video.account.name, "free-one");
+    drop(video);
+
+    pool.set_allow_free_chat(true);
+    let chat = pool.lease_for(RequestKind::Chat).await.expect("free chat on");
+    assert_eq!(chat.account.tier(), AccountTier::Free);
+}
+
+#[tokio::test]
+async fn pro_accounts_serve_chat_and_video() {
+    let pool = pool(&[("pro-one", "c1")], BalanceStrategy::RoundRobin);
+    let chat = pool.lease_for(RequestKind::Chat).await.expect("chat allowed");
+    assert_eq!(chat.account.tier(), AccountTier::Pro);
+    drop(chat);
+    assert!(pool.lease_for(RequestKind::Video).await.is_some());
 }
