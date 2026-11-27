@@ -797,7 +797,7 @@ async fn capture_session(
         base_url: None,
         proxy: None,
         local_ip: None,
-        tier: dragoman::session::AccountTier::Pro,
+        tier: dragoman::session::AccountTier::default(),
         path: Some(session_path),
     })
 }

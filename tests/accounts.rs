@@ -31,6 +31,28 @@ fn pool(entries: &[(&str, &str)], strategy: BalanceStrategy) -> AccountPool {
     .unwrap()
 }
 
+#[test]
+fn sessions_without_a_tier_default_to_free() {
+    let session: SessionData = serde_json::from_value(serde_json::json!({
+        "snlm0e": "at",
+        "f_sid": "sid",
+        "bl": "bl",
+        "cookie": "cookie"
+    }))
+    .unwrap();
+    assert_eq!(session.tier, AccountTier::Free);
+
+    let session: SessionData = serde_json::from_value(serde_json::json!({
+        "snlm0e": "at",
+        "f_sid": "sid",
+        "bl": "bl",
+        "cookie": "cookie",
+        "tier": "pro"
+    }))
+    .unwrap();
+    assert_eq!(session.tier, AccountTier::Pro);
+}
+
 #[tokio::test]
 async fn round_robin_rotates_across_accounts() {
     let pool = pool(

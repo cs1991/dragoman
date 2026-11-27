@@ -156,7 +156,7 @@ impl AccountStore {
             tier: session
                 .as_ref()
                 .map(|session| session.tier.label().to_string())
-                .unwrap_or_else(|| AccountTier::Pro.label().to_string()),
+                .unwrap_or_else(|| AccountTier::default().label().to_string()),
             proxy: session.as_ref().and_then(|session| session.proxy.clone()),
             local_ip: session.and_then(|session| session.local_ip),
             abnormal,

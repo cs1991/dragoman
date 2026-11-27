@@ -8,8 +8,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AccountTier {
-    #[default]
     Pro,
+    #[default]
     Free,
 }
 
@@ -63,7 +63,7 @@ pub struct SessionData {
     /// the fixed mixed port and still leave through different nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_ip: Option<String>,
-    /// Account tier set by the user. Older sessions default to `pro`.
+    /// Account tier set by the user. Older sessions default to `free`.
     #[serde(default)]
     pub tier: AccountTier,
     /// File this session was loaded from. Local machine data, never serialized.
