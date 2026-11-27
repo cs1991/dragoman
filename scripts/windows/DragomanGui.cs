@@ -189,6 +189,11 @@ internal sealed class DragomanGui : Form
         busy = true;
         UpdateButtons();
         try { await action(); }
+        catch (System.ComponentModel.Win32Exception error)
+        {
+            message.Text = "无法启动 dragoman.exe：" + error.Message
+                + "。请整包复制 dragoman-windows 文件夹，并确认杀毒软件没有隔离 dragoman.exe。";
+        }
         catch (Exception error) { message.Text = error.Message; }
         finally { busy = false; if (!IsDisposed) UpdateButtons(); }
     }
@@ -203,6 +208,10 @@ internal sealed class DragomanGui : Form
 
     private Process Spawn(string arguments, bool redirectInput = false)
     {
+        if (!File.Exists(executable))
+            throw new InvalidOperationException(
+                "同目录缺少 dragoman.exe。请把整个 dragoman-windows 文件夹一起复制，不要只复制 DragomanGui.exe。\r\n"
+                + "期望位置：" + executable);
         return Process.Start(new ProcessStartInfo(executable, arguments) {
             UseShellExecute = false,
             CreateNoWindow = true,

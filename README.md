@@ -470,6 +470,30 @@ dragoman/
 
 ---
 
+## Windows 客户端常见问题
+
+### 启动后提示“系统找不到指定的文件”
+
+`DragomanGui.exe` 需要同目录的 `dragoman.exe`。单独复制 GUI 时会出现该提示。
+
+1. 复制整个 `dragoman-windows` 文件夹到本地磁盘，例如 `D:\Dragoman\`。
+2. 确认目录里同时有 `dragoman.exe` 和 `DragomanGui.exe`。
+3. 双击 `DragomanGui.exe` 重新打开。
+
+### 点击按钮后提示“无法启动 dragoman.exe”
+
+Windows Defender 或其他杀毒软件可能隔离了 `dragoman.exe`。
+
+1. 在杀毒软件的隔离区恢复 `dragoman.exe`。
+2. 把整个 `dragoman-windows` 文件夹加入排除项。
+3. 重新打开 GUI。
+
+### 账号列表为空
+
+首次运行还没有账号。点“新增账号”，完成 Google 登录后会话写入 `%USERPROFILE%\.config\dragoman\sessions`。
+
+---
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
