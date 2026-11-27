@@ -19,6 +19,7 @@ pub enum FailureKind {
     Quota,
     Auth,
     Transient,
+    Network,
     Context,
     Model,
 }
@@ -29,6 +30,7 @@ impl FailureKind {
             Self::Quota => Duration::from_secs(300),
             Self::Auth => Duration::from_secs(1800),
             Self::Transient => Duration::from_secs(30),
+            Self::Network => Duration::from_secs(10),
             Self::Context => Duration::from_secs(60),
             Self::Model => Duration::from_secs(120),
         }
@@ -39,6 +41,7 @@ impl FailureKind {
             Self::Quota => "quota",
             Self::Auth => "auth",
             Self::Transient => "transient",
+            Self::Network => "network",
             Self::Context => "context",
             Self::Model => "model",
         }
@@ -426,9 +429,10 @@ impl Account {
         {
             let mut runtime = self.runtime();
             runtime.failures = runtime.failures.saturating_add(1);
-            // A parked model is an upstream capacity problem, not a broken
-            // account, so it does not move the review counter.
-            if kind != FailureKind::Model {
+            // A parked model is an upstream capacity problem and a network
+            // failure is an egress problem. Neither says anything about the
+            // account, so they do not move the review counter.
+            if !matches!(kind, FailureKind::Model | FailureKind::Network) {
                 runtime.consecutive_failures = runtime.consecutive_failures.saturating_add(1);
             }
             runtime.cooldown_until = Some(Instant::now() + kind.cooldown());

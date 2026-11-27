@@ -57,6 +57,7 @@ struct TurnError {
 fn upload_failure_kind(error: &UploadError) -> Option<FailureKind> {
     match error {
         UploadError::Invalid(_) | UploadError::TooLarge(_) => None,
+        UploadError::Connection(_) => Some(FailureKind::Network),
         UploadError::Upstream(message) => {
             if message.contains("HTTP 401") || message.contains("HTTP 403") {
                 Some(FailureKind::Auth)
@@ -66,6 +67,19 @@ fn upload_failure_kind(error: &UploadError) -> Option<FailureKind> {
                 Some(FailureKind::Transient)
             }
         }
+    }
+}
+
+/// Classify a request that never produced an HTTP response.
+///
+/// A refused TCP connection, a failed TLS handshake or a connect timeout is an
+/// egress problem shared by every account, so it must not move the per-account
+/// failure counter.
+fn transport_failure_kind(error: &reqwest::Error) -> FailureKind {
+    if error.is_connect() || error.is_request() || error.is_timeout() {
+        FailureKind::Network
+    } else {
+        FailureKind::Transient
     }
 }
 
@@ -720,7 +734,7 @@ impl GeminiWebClient {
             Ok(resp) => resp,
             Err(e) => {
                 let err_msg = transport_error("Gemini Web request failed", &e);
-                return StreamAttempt::failed(err_msg, FailureKind::Transient);
+                return StreamAttempt::failed(err_msg, transport_failure_kind(&e));
             }
         };
 
@@ -986,5 +1000,25 @@ mod tests {
         let message = super::transport_error("Gemini Web request failed", &error);
         assert!(message.starts_with("Gemini Web request failed:"));
         assert!(!message.contains("http") && !message.contains("fixture"));
+    }
+
+    #[tokio::test]
+    async fn refused_connections_are_classified_as_network_failures() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let error = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/rpc"))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            super::transport_failure_kind(&error),
+            crate::accounts::FailureKind::Network
+        );
     }
 }

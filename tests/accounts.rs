@@ -198,3 +198,17 @@ async fn parked_model_failures_do_not_park_the_account() {
     }
     assert!(!only.is_abnormal());
 }
+
+#[tokio::test]
+async fn network_failures_do_not_park_the_account() {
+    let pool = pool(&[("only", "c1")], BalanceStrategy::RoundRobin);
+    let only = pool.accounts()[0].clone();
+    for _ in 0..20 {
+        only.note_failure(
+            FailureKind::Network,
+            "Gemini Web request failed: The connection failed.",
+        );
+    }
+    assert_eq!(only.consecutive_failures(), 0);
+    assert!(!only.is_abnormal());
+}

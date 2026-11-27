@@ -23,6 +23,7 @@ pub struct UploadedFile {
 pub enum UploadError {
     Invalid(String),
     TooLarge(String),
+    Connection(String),
     Upstream(String),
 }
 
@@ -31,6 +32,7 @@ impl UploadError {
         match self {
             Self::Invalid(_) => 400,
             Self::TooLarge(_) => 413,
+            Self::Connection(_) => 502,
             Self::Upstream(_) => 502,
         }
     }
@@ -39,7 +41,10 @@ impl UploadError {
 impl std::fmt::Display for UploadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Invalid(message) | Self::TooLarge(message) | Self::Upstream(message) => {
+            Self::Invalid(message)
+            | Self::TooLarge(message)
+            | Self::Connection(message)
+            | Self::Upstream(message) => {
                 formatter.write_str(message)
             }
         }
@@ -160,14 +165,20 @@ pub async fn upload_to_endpoint(
         .send()
         .await
         .map_err(|error| {
+            let transport = error.is_connect() || error.is_request() || error.is_timeout();
             let detail = if error.is_timeout() {
                 "Attachment upload timed out"
-            } else if error.is_connect() {
+            } else if transport {
                 "Attachment upload could not connect to Google"
             } else {
                 "Attachment upload failed"
             };
-            UploadError::Upstream(detail.to_string())
+            let message = detail.to_string();
+            if transport {
+                UploadError::Connection(message)
+            } else {
+                UploadError::Upstream(message)
+            }
         })?;
 
     let status = response.status();
@@ -500,7 +511,9 @@ async fn build_part(
                 .timeout(UPLOAD_TIMEOUT)
                 .send()
                 .await
-                .map_err(|_| UploadError::Upstream("Attachment download failed".to_string()))?;
+                .map_err(|_| {
+                    UploadError::Connection("Attachment download failed".to_string())
+                })?;
 
             if !response.status().is_success() {
                 return Err(UploadError::Upstream(format!(
@@ -525,7 +538,7 @@ async fn build_part(
                 let mut stream = response.bytes_stream();
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk.map_err(|_| {
-                        UploadError::Upstream("Attachment download failed".to_string())
+                        UploadError::Connection("Attachment download failed".to_string())
                     })?;
                     if collected.len() as u64 + chunk.len() as u64 > max_bytes {
                         return Err(too_large(
