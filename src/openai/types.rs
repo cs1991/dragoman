@@ -71,14 +71,34 @@ fn rendered_text(content: &Value) -> String {
 
 /// Some clients serialize the content part array into a JSON string before
 /// sending it. Parse that representation when it clearly carries content parts.
+///
+/// Plain JSON payloads such as a tool schema or a skill manifest are ordinary
+/// message text. Treating them as content parts would drop every key except
+/// `text`, so only shapes that carry part markers are parsed.
 fn structured_json(text: &str) -> Option<Value> {
     let trimmed = text.trim_start();
     if !(trimmed.starts_with('[') || trimmed.starts_with('{')) || text.len() > 4 * 1024 * 1024 {
         return None;
     }
     let parsed: Value = serde_json::from_str(text).ok()?;
-    let looks_structured = matches!(&parsed, Value::Array(_) | Value::Object(_));
-    looks_structured.then_some(parsed)
+    let looks_like_parts = match &parsed {
+        Value::Array(items) => {
+            let entries_are_parts = items
+                .iter()
+                .all(|item| item.is_object() || item.is_string());
+            entries_are_parts
+                && items.iter().any(|item| {
+                    item.get("type").and_then(Value::as_str).is_some()
+                        || item.get("text").and_then(Value::as_str).is_some()
+                })
+        }
+        Value::Object(object) => {
+            object.get("type").and_then(Value::as_str).is_some()
+                || object.get("text").and_then(Value::as_str).is_some()
+        }
+        _ => false,
+    };
+    looks_like_parts.then_some(parsed)
 }
 
 const MIN_INLINE_MEDIA_CHARS: usize = 64;
@@ -823,4 +843,13 @@ pub struct ModelObject {
     pub object: String,
     pub created: u64,
     pub owned_by: String,
+    /// Context window advertised to OpenAI-compatible clients.
+    ///
+    /// Clients that read this field size their prompt budget from it. Without
+    /// it several clients fall back to a few thousand tokens and trim the
+    /// conversation history themselves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_model_len: Option<u32>,
 }

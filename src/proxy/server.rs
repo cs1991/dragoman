@@ -20,6 +20,7 @@ use crate::openai::types::*;
 use crate::proxy::translator::PromptTranslator;
 use crate::web::GeminiWebClient;
 use crate::web::models;
+use crate::web::models::CONTEXT_WINDOW;
 
 pub struct AppState {
     pub web_client: Arc<GeminiWebClient>,
@@ -80,6 +81,8 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             object: "model".to_string(),
             created: now,
             owned_by: "google".to_string(),
+            context_length: Some(CONTEXT_WINDOW),
+            max_model_len: Some(CONTEXT_WINDOW),
         })
         .collect();
     if !data.iter().any(|model| model.id == state.default_model) {
@@ -88,6 +91,8 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             object: "model".to_string(),
             created: now,
             owned_by: "google".to_string(),
+            context_length: Some(CONTEXT_WINDOW),
+            max_model_len: Some(CONTEXT_WINDOW),
         });
     }
 

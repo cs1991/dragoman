@@ -286,6 +286,36 @@ fn media_objects_do_not_become_prompt_text() {
 }
 
 #[test]
+fn plain_json_message_text_is_preserved() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-hydrogen",
+        "messages": [{
+            "role": "user",
+            "content": "{\"skill\":\"pdf\",\"steps\":[\"extract\",\"render\"],\"secret\":\"JSON-KEY-991\"}"
+        }]
+    }))
+    .unwrap();
+
+    let rendered = request.messages[0].content_as_str();
+    assert!(rendered.contains("JSON-KEY-991"));
+    assert!(rendered.contains("\"steps\""));
+}
+
+#[test]
+fn serialized_content_parts_are_still_rendered() {
+    let request: ChatCompletionRequest = serde_json::from_value(json!({
+        "model": "gemini-4-hydrogen",
+        "messages": [{
+            "role": "user",
+            "content": "[{\"type\":\"text\",\"text\":\"first\"},{\"type\":\"text\",\"text\":\"second\"}]"
+        }]
+    }))
+    .unwrap();
+
+    assert_eq!(request.messages[0].content_as_str(), "first\nsecond");
+}
+
+#[test]
 fn flags_unsupported_media_parts() {
     let request: ChatCompletionRequest = serde_json::from_value(json!({
         "model": "gemini-4-argon",

@@ -48,6 +48,13 @@ pub const CARBON: ModelSpec = ModelSpec {
 /// Models advertised on `/v1/models` and accepted by `/v1/chat/completions`.
 pub const ADVERTISED: [ModelSpec; 3] = [AUTO, HYDROGEN, NEON];
 
+/// Context window advertised to OpenAI-compatible clients.
+///
+/// A 180000 character prompt round-trips through StreamGenerate, so 128000
+/// tokens is a conservative budget that keeps clients from trimming history
+/// themselves while staying below what the web endpoint accepts.
+pub const CONTEXT_WINDOW: u32 = 128_000;
+
 pub fn default_model() -> ModelSpec {
     HYDROGEN
 }
