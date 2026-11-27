@@ -49,6 +49,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/accounts", get(list_accounts))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(crate::proxy::responses::responses))
         .route("/health", get(health_check))
         .route("/", get(root_handler))
         .layer(DefaultBodyLimit::max(body_limit))
@@ -399,7 +400,7 @@ async fn chat_completions(
 /// A parked model is an upstream availability problem the caller can act on
 /// by retrying later or switching models, so it answers 503 instead of the
 /// generic 500 used for unexpected failures.
-fn classify_generation_error(error: String) -> (String, u16, &'static str) {
+pub(crate) fn classify_generation_error(error: String) -> (String, u16, &'static str) {
     if let Some(detail) = error.strip_prefix(crate::web::client::MODEL_PARKED_MARKER) {
         return (detail.to_string(), 503, "model_not_available");
     }
@@ -410,7 +411,11 @@ fn classify_generation_error(error: String) -> (String, u16, &'static str) {
     )
 }
 
-fn openai_error(status: StatusCode, error_type: &str, message: impl Into<String>) -> Response {
+pub(crate) fn openai_error(
+    status: StatusCode,
+    error_type: &str,
+    message: impl Into<String>,
+) -> Response {
     let payload = serde_json::json!({
         "error": {
             "message": message.into(),

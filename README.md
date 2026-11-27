@@ -11,7 +11,7 @@
 
 - Direct Gemini 4 access: Routes queries to Hydrogen, Auto, or Neon through web sessions. The model is selected per request.
 - Zero browser runtime: Uses native HTTP/2 direct RPC (`StreamGenerate`). Chrome does not run in the background during normal use.
-- Standard OpenAI API compatibility: Implements `/v1/chat/completions`, `/v1/models`, and `/health`.
+- Standard OpenAI API compatibility: Implements `/v1/chat/completions`, `/v1/responses`, `/v1/models`, and `/health`.
 - Real-time streaming: Server-Sent Events (SSE) deliver chunked token responses as they generate.
 - Attachment analysis: video, image and file content parts are uploaded and attached to the Gemini request.
 - Tool calling translation: Formats tool schemas into instructions and parses `<tool_call>` outputs into standard OpenAI `tool_calls` structures.
@@ -270,6 +270,47 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
     ],
     "stream": true
   }'
+```
+
+### Responses API
+
+`POST /v1/responses` accepts the OpenAI Responses envelope and answers with a `response` object. This covers clients that never call `/v1/chat/completions`, including the OpenAI Python SDK `client.responses.create` path.
+
+Accepted request fields are listed below.
+
+| Field | Handling |
+|---|---|
+| `input` | A string, or a list of `message`, `function_call`, `function_call_output`, `custom_tool_call` and `custom_tool_call_output` items |
+| `instructions` | Sent as a system message |
+| `tools` | Flat Responses definitions are converted to the nested chat shape, `type: custom` becomes a function with one `input` string |
+| `tool_choice`, `parallel_tool_calls` | Echoed on the response object |
+| `max_output_tokens`, `temperature`, `top_p` | Forwarded to the upstream request |
+| `text.format` | `json_schema` and `json_object` add a format instruction to the prompt |
+| `stream` | Emits the named Responses events |
+| `previous_response_id` | Replays the stored messages for that response when the client sends only the new turn |
+| `store` | Default true. Stored messages are bounded to 128 responses and cap each message at 32000 characters |
+
+Non-streaming request.
+
+```bash
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-4-hydrogen",
+    "input": "Explain what a dragoman was in history in 20 words."
+  }'
+```
+
+Streaming emits `response.created`, `response.in_progress`, `response.output_item.added`, `response.content_part.added`, `response.output_text.delta`, `response.output_text.done`, `response.content_part.done`, `response.output_item.done`, and `response.completed`. Tool calls arrive as `response.function_call_arguments.delta`, `response.function_call_arguments.done`, and a `function_call` item in `response.output_item.done`.
+
+Python SDK usage.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="dummy")
+response = client.responses.create(model="gemini-4-hydrogen", input="Say hello in five words.")
+print(response.output_text)
 ```
 
 ### Video and File Attachments
