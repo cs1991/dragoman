@@ -119,6 +119,26 @@ impl SessionData {
 
     pub fn save(&self) -> Result<(), String> {
         let path = self.path.clone().unwrap_or_else(Self::config_path);
+        self.write_to(&path)
+    }
+
+    /// Persist only the Gemini conversation cursors.
+    ///
+    /// A running proxy keeps its own copy of every session. Writing that copy
+    /// back verbatim would overwrite settings the GUI changed on disk a moment
+    /// earlier, which is how a `pro` mark turned back into `free` after a turn.
+    /// The file is re-read and only the cursor fields are replaced.
+    pub fn save_conversation(&self) -> Result<(), String> {
+        let path = self.path.clone().unwrap_or_else(Self::config_path);
+        let mut merged = Self::load_from(&path).unwrap_or_else(|_| self.clone());
+        merged.conversation_id = self.conversation_id.clone();
+        merged.response_id = self.response_id.clone();
+        merged.choice_id = self.choice_id.clone();
+        merged.path = Some(path.clone());
+        merged.write_to(&path)
+    }
+
+    fn write_to(&self, path: &std::path::Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -126,7 +146,7 @@ impl SessionData {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize session: {}", e))?;
 
-        std::fs::write(&path, json).map_err(|e| format!("Failed to write session file: {}", e))?;
+        std::fs::write(path, json).map_err(|e| format!("Failed to write session file: {}", e))?;
 
         Ok(())
     }

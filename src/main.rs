@@ -322,6 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 if let Ok(previous) = SessionData::load_from(&path) {
+                    session.tier = previous.tier;
                     session.local_ip = previous.local_ip;
                     if proxy.is_none() {
                         session.proxy = previous.proxy;
@@ -371,6 +372,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             else {
                 return Err("Chrome 已关闭。重新运行 login，完成登录后会话会自动保存。".into());
             };
+            if let Ok(previous) = SessionData::load_from(&session_path) {
+                session.tier = previous.tier;
+                session.local_ip = previous.local_ip;
+                if session.proxy.is_none() {
+                    session.proxy = previous.proxy;
+                }
+            }
             if let Some(value) = proxy.filter(|value| !value.trim().is_empty()) {
                 session.proxy = Some(value);
             }

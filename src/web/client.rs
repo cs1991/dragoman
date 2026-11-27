@@ -679,7 +679,7 @@ impl GeminiWebClient {
         session.conversation_id = None;
         session.response_id = None;
         session.choice_id = None;
-        if let Err(error) = session.save() {
+        if let Err(error) = session.save_conversation() {
             tracing::error!("Could not persist cleared Gemini conversation: {}", error);
         }
     }
@@ -941,7 +941,7 @@ impl GeminiWebClient {
             if let Some(chid) = new_choice_id {
                 s.choice_id = Some(chid);
             }
-            let _ = s.save();
+            let _ = s.save_conversation();
         }
 
         info!(

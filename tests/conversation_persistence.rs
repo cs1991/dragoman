@@ -1,6 +1,47 @@
-use dragoman::session::SessionData;
+use dragoman::session::{AccountTier, SessionData};
 use dragoman::web::GeminiWebClient;
 use serde_json::json;
+
+fn fixture_session(path: std::path::PathBuf) -> SessionData {
+    SessionData {
+        snlm0e: "at".to_string(),
+        f_sid: "sid".to_string(),
+        bl: "bl".to_string(),
+        cookie: "cookie".to_string(),
+        model: "Argon4p0".to_string(),
+        conversation_id: None,
+        response_id: None,
+        choice_id: None,
+        base_url: None,
+        proxy: None,
+        local_ip: None,
+        tier: AccountTier::Pro,
+        path: Some(path),
+    }
+}
+
+#[test]
+fn saving_a_conversation_keeps_the_tier_written_by_the_gui() {
+    let dir = std::env::temp_dir().join(format!("dragoman-tier-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("account.json");
+
+    let mut on_disk = fixture_session(path.clone());
+    on_disk.tier = AccountTier::Pro;
+    on_disk.save().unwrap();
+
+    // A running proxy still holds the old copy with `free`.
+    let mut stale = on_disk.clone();
+    stale.tier = AccountTier::Free;
+    stale.conversation_id = Some("c_turn_1".to_string());
+    stale.save_conversation().unwrap();
+
+    let read = SessionData::load_from(&path).unwrap();
+    assert_eq!(read.tier, AccountTier::Pro);
+    assert_eq!(read.conversation_id.as_deref(), Some("c_turn_1"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
 
 #[test]
 fn test_stream_generate_payload_slot_defaults() {
