@@ -124,6 +124,45 @@ fn transport_error(action: &str, error: &reqwest::Error) -> String {
     format!("{action}: {detail}")
 }
 
+/// Decode a byte stream that can split one UTF-8 character across chunks.
+///
+/// Decoding each chunk on its own turns a split three-byte Chinese character
+/// into three replacement characters, so an incomplete tail waits in `pending`
+/// for the next chunk. Bytes that are genuinely invalid still become U+FFFD.
+fn decode_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
+    pending.extend_from_slice(chunk);
+    let mut output = String::new();
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(text) => {
+                output.push_str(text);
+                pending.clear();
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0
+                    && let Ok(text) = std::str::from_utf8(&pending[..valid])
+                {
+                    output.push_str(text);
+                }
+                match error.error_len() {
+                    Some(length) => {
+                        output.push('\u{FFFD}');
+                        pending.drain(..valid + length);
+                    }
+                    None => {
+                        // Incomplete character at the end of this chunk.
+                        pending.drain(..valid);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    output
+}
+
 /// Message used when every account is parked or cooling down.
 ///
 /// Retrying an abnormal account only burns one more failure, so the caller gets
@@ -775,6 +814,7 @@ impl GeminiWebClient {
         let mut stream = response.bytes_stream();
         let mut full_text = String::new();
         let mut line_buffer = String::new();
+        let mut pending_bytes: Vec<u8> = Vec::new();
         let mut first_chunk = true;
         let mut chunks = 0usize;
         let mut parked_ticks = 0usize;
@@ -814,6 +854,10 @@ impl GeminiWebClient {
             };
 
             let Some(chunk_res) = next else {
+                if !pending_bytes.is_empty() {
+                    line_buffer.push_str(&String::from_utf8_lossy(&pending_bytes));
+                    pending_bytes.clear();
+                }
                 break;
             };
             chunks += 1;
@@ -838,7 +882,7 @@ impl GeminiWebClient {
                     };
                 }
             };
-            let chunk_str = String::from_utf8_lossy(&chunk);
+            let chunk_str = decode_utf8_chunk(&mut pending_bytes, &chunk);
             line_buffer.push_str(&chunk_str);
 
             while let Some(newline_pos) = line_buffer.find('\n') {
@@ -1038,5 +1082,34 @@ mod tests {
             super::transport_failure_kind(&error),
             crate::accounts::FailureKind::Network
         );
+    }
+
+    #[test]
+    fn utf8_split_across_chunks_is_reassembled() {
+        let text = "凑近一步";
+        let mut pending = Vec::new();
+        let mut output = String::new();
+        for byte in text.as_bytes() {
+            output.push_str(&super::decode_utf8_chunk(&mut pending, &[*byte]));
+        }
+        assert_eq!(output, text);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn incomplete_utf8_tail_waits_for_the_next_chunk() {
+        let bytes = "中".as_bytes();
+        let mut pending = Vec::new();
+        assert_eq!(super::decode_utf8_chunk(&mut pending, &bytes[..2]), "");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(super::decode_utf8_chunk(&mut pending, &bytes[2..]), "中");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_becomes_a_replacement_character() {
+        let mut pending = Vec::new();
+        assert_eq!(super::decode_utf8_chunk(&mut pending, &[0xFF, b'a']), "\u{FFFD}a");
+        assert!(pending.is_empty());
     }
 }
