@@ -38,7 +38,7 @@ internal sealed class DragomanGui : Form
     private readonly NumericUpDown share = new NumericUpDown { Minimum = 1, Maximum = 100, Value = 1, Width = 52 };
     private readonly ComboBox strategy = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 120 };
     private readonly CheckBox allowFreeChat = new CheckBox { Text = "Free 号可对话", AutoSize = true, Margin = new Padding(10, 6, 3, 0) };
-    private readonly Button start, stop, copy, add, batchLogin, loginAgain, toggle, remove, setProxy, bulkProxy, setPro, setFree, refresh, cancelLogin;
+    private readonly Button start, stop, copy, add, batchLogin, loginAgain, toggle, remove, setProxy, bulkProxy, setPro, setFree, setUltra, refresh, cancelLogin;
     private Process server, login;
     private bool busy, ready, closing, stopping, loginCanceled, loadingSettings;
     private Account Selected { get { return accounts.SelectedItems.Count == 0 ? null : (Account)accounts.SelectedItems[0].Tag; } }
@@ -117,6 +117,7 @@ internal sealed class DragomanGui : Form
         bulkProxy = Button(accountBar, "批量分配代理", async () => await Run(AssignProxies));
         setPro = Button(accountBar, "设为 Pro", async () => await Run(() => SetTier("pro")));
         setFree = Button(accountBar, "设为 Free", async () => await Run(() => SetTier("free")));
+        setUltra = Button(accountBar, "设为 Ultra", async () => await Run(() => SetTier("ultra")));
         toggle = Button(accountBar, "停用", async () => await Run(ToggleAccount));
         remove = Button(accountBar, "删除", async () => await Run(RemoveAccount));
         refresh = Button(accountBar, "刷新列表", async () => await Run(RefreshAccounts));
@@ -159,7 +160,7 @@ internal sealed class DragomanGui : Form
         add.Enabled = batchLogin.Enabled = bulkProxy.Enabled = idle;
         port.Enabled = strategy.Enabled = share.Enabled = idle && stopped;
         remove.Enabled = toggle.Enabled = loginAgain.Enabled = setProxy.Enabled = idle && selected != null;
-        setPro.Enabled = setFree.Enabled = idle && selected != null;
+        setPro.Enabled = setFree.Enabled = setUltra.Enabled = idle && selected != null;
         toggle.Text = selected != null && !selected.enabled ? "启用" : "停用";
         start.Enabled = idle && stopped;
         stop.Enabled = server != null && !busy && !closing;

@@ -355,8 +355,18 @@ impl Account {
     pub fn supports(&self, kind: RequestKind, allow_free_chat: bool) -> bool {
         match kind {
             RequestKind::Video => true,
-            RequestKind::Chat => self.tier == AccountTier::Pro || allow_free_chat,
+            RequestKind::Chat => {
+                matches!(self.tier, AccountTier::Pro | AccountTier::Ultra) || allow_free_chat
+            }
         }
+    }
+
+    /// Whether this account can serve `model` on top of the request kind.
+    ///
+    /// Carbon runs only on an Ultra subscription. Every other model is
+    /// available on any tier the request kind already allows.
+    pub fn supports_model(&self, requires_ultra: bool) -> bool {
+        !requires_ultra || self.tier == AccountTier::Ultra
     }
 
     fn runtime(&self) -> std::sync::MutexGuard<'_, AccountRuntime> {
@@ -963,18 +973,21 @@ impl AccountPool {
     /// marked abnormal, so the caller can answer with a clear error instead of
     /// burning a broken account.
     pub async fn lease(&self) -> Option<Lease> {
-        self.lease_for(RequestKind::Chat).await
+        self.lease_for(RequestKind::Chat, false).await
     }
 
-    /// Reserve one account that is allowed to serve `kind`.
+    /// Reserve one account that is allowed to serve `kind` and `model`.
     ///
     /// Video analysis accepts both tiers. Chat accepts `pro` accounts and, when
-    /// the global switch is on, `free` accounts too.
-    pub async fn lease_for(&self, kind: RequestKind) -> Option<Lease> {
+    /// the global switch is on, `free` accounts too. `requires_ultra` narrows
+    /// the pool to Ultra accounts, which is how `gemini-4-carbon` is routed.
+    pub async fn lease_for(&self, kind: RequestKind, requires_ultra: bool) -> Option<Lease> {
         self.reload_if_changed_throttled();
         let accounts = self.accounts();
         let allow_free_chat = self.allow_free_chat();
-        let eligible = |account: &Arc<Account>| account.supports(kind, allow_free_chat);
+        let eligible = |account: &Arc<Account>| {
+            account.supports(kind, allow_free_chat) && account.supports_model(requires_ultra)
+        };
         let len = accounts.len();
         if len == 0 {
             return None;
@@ -1026,6 +1039,13 @@ impl AccountPool {
     pub fn note_success(&self, account: &Account) {
         account.note_success();
         self.total_served.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether any loaded account carries `tier`. Used to advertise Carbon and
+    /// to answer a Carbon request with a precise error.
+    pub fn has_tier(&self, tier: AccountTier) -> bool {
+        self.reload_if_changed_throttled();
+        self.accounts().iter().any(|account| account.tier() == tier)
     }
 
     pub async fn status(&self) -> PoolStatus {

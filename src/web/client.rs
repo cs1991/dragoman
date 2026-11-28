@@ -167,10 +167,16 @@ fn decode_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
 ///
 /// Retrying an abnormal account only burns one more failure, so the caller gets
 /// one actionable sentence instead.
-fn no_healthy_account_message(pool: &AccountPool, kind: RequestKind) -> String {
+fn no_healthy_account_message(
+    pool: &AccountPool,
+    kind: RequestKind,
+    requires_ultra: bool,
+) -> String {
     if pool.is_empty() {
         "No Gemini account is loaded right now. Sign in one; the proxy picks it up automatically."
             .to_string()
+    } else if requires_ultra && !pool.has_tier(crate::session::AccountTier::Ultra) {
+        "gemini-4-carbon runs only on an Ultra account and none is loaded. Mark one account as Ultra in the GUI, then retry.".to_string()
     } else if kind == RequestKind::Chat
         && !pool.allow_free_chat()
         && pool
@@ -178,7 +184,7 @@ fn no_healthy_account_message(pool: &AccountPool, kind: RequestKind) -> String {
             .iter()
             .all(|account| account.tier() == crate::session::AccountTier::Free)
     {
-        "Every loaded account is a free account and free chat is off. Mark one account as pro or enable allow-free-chat in the GUI.".to_string()
+        "Every loaded account is a free account and free chat is off. Mark one account as pro or ultra, or enable allow-free-chat in the GUI.".to_string()
     } else {
         "No Gemini account is available right now. Every account is cooling down or marked abnormal. Sign in again to repair one, or clear its mark with 'dragoman accounts --clear NAME'.".to_string()
     }
@@ -438,8 +444,8 @@ impl GeminiWebClient {
         kind: RequestKind,
         delta_tx: mpsc::Sender<Result<String, String>>,
     ) -> Result<String, String> {
-        let Some(lease) = self.pool.lease_for(kind).await else {
-            let message = no_healthy_account_message(&self.pool, kind);
+        let Some(lease) = self.pool.lease_for(kind, model.requires_ultra).await else {
+            let message = no_healthy_account_message(&self.pool, kind, model.requires_ultra);
             let _ = delta_tx.send(Err(message.clone())).await;
             return Err(message);
         };
@@ -498,8 +504,8 @@ impl GeminiWebClient {
         let mut tried: Vec<String> = Vec::new();
 
         for attempt in 0..attempt_cap {
-            let Some(lease) = self.pool.lease_for(kind).await else {
-                last_error = no_healthy_account_message(&self.pool, kind);
+            let Some(lease) = self.pool.lease_for(kind, model.requires_ultra).await else {
+                last_error = no_healthy_account_message(&self.pool, kind, model.requires_ultra);
                 break;
             };
             let account = lease.account.clone();

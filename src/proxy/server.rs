@@ -76,7 +76,11 @@ async fn list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .unwrap_or_default()
         .as_secs();
 
-    let mut data: Vec<ModelObject> = models::ADVERTISED
+    let has_ultra = state
+        .web_client
+        .pool()
+        .has_tier(crate::session::AccountTier::Ultra);
+    let mut data: Vec<ModelObject> = models::advertised_for_pool(has_ultra)
         .iter()
         .map(|model| ModelObject {
             id: model.name.to_string(),
@@ -183,6 +187,18 @@ async fn chat_completions(
             StatusCode::BAD_REQUEST,
             "model_not_available",
             "Carbon requires a Google AI Ultra subscription.",
+        );
+    }
+    if model.requires_ultra
+        && !state
+            .web_client
+            .pool()
+            .has_tier(crate::session::AccountTier::Ultra)
+    {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "model_not_available",
+            "gemini-4-carbon runs only on an Ultra account and none is loaded. Mark one account as Ultra in the GUI, then retry.",
         );
     }
 

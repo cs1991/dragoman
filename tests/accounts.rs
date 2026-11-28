@@ -3,6 +3,10 @@ use dragoman::session::{AccountTier, SessionData};
 use std::sync::Arc;
 
 fn session(cookie: &str) -> SessionData {
+    session_with_tier(cookie, AccountTier::Pro)
+}
+
+fn session_with_tier(cookie: &str, tier: AccountTier) -> SessionData {
     SessionData {
         snlm0e: "at".to_string(),
         f_sid: "sid".to_string(),
@@ -15,7 +19,7 @@ fn session(cookie: &str) -> SessionData {
         base_url: None,
         proxy: None,
         local_ip: None,
-        tier: dragoman::session::AccountTier::Pro,
+        tier,
         path: None,
     }
 }
@@ -27,6 +31,17 @@ fn pool(entries: &[(&str, &str)], strategy: BalanceStrategy) -> AccountPool {
             .map(|(name, cookie)| ((*name).to_string(), session(cookie)))
             .collect(),
         strategy,
+    )
+    .unwrap()
+}
+
+fn pool_with_tiers(entries: &[(&str, &str, AccountTier)]) -> AccountPool {
+    AccountPool::from_sessions(
+        entries
+            .iter()
+            .map(|(name, cookie, tier)| ((*name).to_string(), session_with_tier(cookie, *tier)))
+            .collect(),
+        BalanceStrategy::RoundRobin,
     )
     .unwrap()
 }
@@ -51,6 +66,60 @@ fn sessions_without_a_tier_default_to_free() {
     }))
     .unwrap();
     assert_eq!(session.tier, AccountTier::Pro);
+
+    let session: SessionData = serde_json::from_value(serde_json::json!({
+        "snlm0e": "at",
+        "f_sid": "sid",
+        "bl": "bl",
+        "cookie": "cookie",
+        "tier": "ultra"
+    }))
+    .unwrap();
+    assert_eq!(session.tier, AccountTier::Ultra);
+    assert_eq!(session.tier.label(), "ultra");
+}
+
+#[test]
+fn ultra_tier_accepts_common_spellings() {
+    for value in ["ultra", "Ultra", " ULTRA ", "ultimate", "ai-ultra"] {
+        assert_eq!(AccountTier::parse(value), Some(AccountTier::Ultra));
+    }
+    assert_eq!(AccountTier::parse("pro"), Some(AccountTier::Pro));
+    assert_eq!(AccountTier::parse("free"), Some(AccountTier::Free));
+    assert_eq!(AccountTier::parse("gold"), None);
+}
+
+#[tokio::test]
+async fn carbon_lease_requires_an_ultra_account() {
+    let pool = pool_with_tiers(&[
+        ("pro-one", "c1", AccountTier::Pro),
+        ("free-one", "c2", AccountTier::Free),
+    ]);
+    assert!(!pool.has_tier(AccountTier::Ultra));
+    assert!(pool.lease_for(RequestKind::Chat, true).await.is_none());
+    assert!(pool.lease_for(RequestKind::Chat, false).await.is_some());
+}
+
+#[tokio::test]
+async fn carbon_lease_picks_the_ultra_account_and_skips_free_chat() {
+    let pool = pool_with_tiers(&[
+        ("pro-one", "c1", AccountTier::Pro),
+        ("free-one", "c2", AccountTier::Free),
+        ("ultra-one", "c3", AccountTier::Ultra),
+    ]);
+    assert!(pool.has_tier(AccountTier::Ultra));
+    for _ in 0..3 {
+        let lease = pool
+            .lease_for(RequestKind::Chat, true)
+            .await
+            .expect("ultra account");
+        assert_eq!(lease.account.name, "ultra-one");
+        assert_eq!(lease.account.tier(), AccountTier::Ultra);
+    }
+
+    let free_only = pool_with_tiers(&[("free-one", "c4", AccountTier::Free)]);
+    free_only.set_allow_free_chat(true);
+    assert!(free_only.lease_for(RequestKind::Chat, true).await.is_none());
 }
 
 #[tokio::test]
@@ -246,21 +315,22 @@ async fn free_accounts_only_serve_video_until_the_switch_is_on() {
     )
     .unwrap();
 
-    assert!(pool.lease_for(RequestKind::Chat).await.is_none());
-    let video = pool.lease_for(RequestKind::Video).await.expect("video allowed");
+    assert!(pool.lease_for(RequestKind::Chat, false).await.is_none());
+    let video = pool.lease_for(RequestKind::Video, false).await.expect("video allowed");
     assert_eq!(video.account.name, "free-one");
     drop(video);
 
     pool.set_allow_free_chat(true);
-    let chat = pool.lease_for(RequestKind::Chat).await.expect("free chat on");
+    let chat = pool.lease_for(RequestKind::Chat, false).await.expect("free chat on");
     assert_eq!(chat.account.tier(), AccountTier::Free);
 }
 
 #[tokio::test]
 async fn pro_accounts_serve_chat_and_video() {
     let pool = pool(&[("pro-one", "c1")], BalanceStrategy::RoundRobin);
-    let chat = pool.lease_for(RequestKind::Chat).await.expect("chat allowed");
+    let chat = pool.lease_for(RequestKind::Chat, false).await.expect("chat allowed");
     assert_eq!(chat.account.tier(), AccountTier::Pro);
     drop(chat);
-    assert!(pool.lease_for(RequestKind::Video).await.is_some());
+    assert!(pool.lease_for(RequestKind::Video, false).await.is_some());
 }
+

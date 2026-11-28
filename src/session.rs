@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 /// What an account is allowed to do.
 ///
-/// `Pro` accounts answer chat requests and analyze media. `Free` accounts only
+/// `Pro` and `Ultra` accounts answer chat requests and analyze media. `Ultra`
+/// accounts also unlock the `gemini-4-carbon` model. `Free` accounts only
 /// analyze video unless the global free-chat switch is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -11,6 +12,7 @@ pub enum AccountTier {
     Pro,
     #[default]
     Free,
+    Ultra,
 }
 
 impl AccountTier {
@@ -18,6 +20,7 @@ impl AccountTier {
         match value.trim().to_ascii_lowercase().as_str() {
             "pro" | "plus" | "paid" => Some(Self::Pro),
             "free" | "basic" => Some(Self::Free),
+            "ultra" | "ultimate" | "ai-ultra" | "ai_ultra" => Some(Self::Ultra),
             _ => None,
         }
     }
@@ -26,6 +29,7 @@ impl AccountTier {
         match self {
             Self::Pro => "pro",
             Self::Free => "free",
+            Self::Ultra => "ultra",
         }
     }
 }

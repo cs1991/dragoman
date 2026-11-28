@@ -176,7 +176,7 @@ enum AccountAction {
     SetTier {
         #[arg(long)]
         id: String,
-        /// `pro` or `free`
+        /// `pro`, `free` or `ultra`
         #[arg(long)]
         tier: String,
     },
@@ -498,7 +498,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AccountAction::SetTier { id, tier } => {
                     let tier = dragoman::session::AccountTier::parse(&tier)
-                        .ok_or("Tier must be pro or free")?;
+                        .ok_or("Tier must be pro, free or ultra")?;
                     store.set_tier(&id, tier)?;
                     println!("{}", serde_json::to_string(&store.list()?)?);
                 }

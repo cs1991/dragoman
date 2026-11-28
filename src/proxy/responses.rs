@@ -257,6 +257,18 @@ pub async fn responses(
             "Carbon requires a Google AI Ultra subscription.",
         );
     }
+    if model_spec.requires_ultra
+        && !state
+            .web_client
+            .pool()
+            .has_tier(crate::session::AccountTier::Ultra)
+    {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "model_not_available",
+            "gemini-4-carbon runs only on an Ultra account and none is loaded. Mark one account as Ultra in the GUI, then retry.",
+        );
+    }
 
     let meta = ResponseMeta::from_request(&request, &chat.model);
     let is_stream = request.stream.unwrap_or(false);

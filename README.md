@@ -1,6 +1,6 @@
 # Dragoman
 
-> Dragoman: A local OpenAI-compatible bridge written in Rust. Routes requests from coding agents (Cline, Aider, OpenHands, Codex) to Gemini Web (`gemini.google.com`) to query the Gemini 4 models with a Google AI Pro subscription.
+> Dragoman: A local OpenAI-compatible bridge written in Rust. Routes requests from coding agents (Cline, Aider, OpenHands, Codex) to Gemini Web (`gemini.google.com`) to query the Gemini 4 models with a Google AI Pro or Ultra subscription.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-2024_Edition-orange.svg)](https://www.rust-lang.org/)
@@ -15,7 +15,7 @@
 - Real-time streaming: Server-Sent Events (SSE) deliver chunked token responses as they generate.
 - Attachment analysis: video, image and file content parts are uploaded and attached to the Gemini request.
 - Tool calling translation: Formats tool schemas into instructions and parses `<tool_call>` outputs into standard OpenAI `tool_calls` structures.
-- No API tokens required: Works with personal Google AI Pro subscriptions without Google Cloud billing.
+- No API tokens required: Works with personal Google AI Pro or Ultra subscriptions without Google Cloud billing.
 
 ---
 
@@ -235,14 +235,35 @@ Dragoman accepts requests with or without an `Authorization` header and does not
 | `gemini-4-hydrogen` | `56fdd199312815e2` | Everyday help, lowest latency. This is the default. |
 | `gemini-4-auto` | `8c46e95b1a07cecc` | Gemini picks the depth per prompt. |
 | `gemini-4-neon` | `e6fa609c3fa255c0` | Deeper analysis. It reasons longer and runs code for arithmetic. |
+| `gemini-4-carbon` | `95a4c0abcba24364` | Frontier model for complex work. Routed only to Ultra accounts. |
 
 The legacy names `gemini-4-argon` and `gemini-4-argon-thinking` still resolve. They map to Hydrogen and Neon. An unknown name falls back to Hydrogen.
 
-`gemini-4-carbon` answers 400 with `model_not_available`. The web app shows Carbon behind a Google AI Ultra upgrade, so a Pro session cannot generate with it.
+`gemini-4-carbon` runs only on an account marked `ultra`. When at least one Ultra account is loaded, `/v1/models` includes Carbon and every Carbon request is leased from the Ultra subset. With no Ultra account loaded the request fails with HTTP 400 `model_not_available` and this message.
+
+```
+gemini-4-carbon runs only on an Ultra account and none is loaded. Mark one account as Ultra in the GUI, then retry.
+```
 
 Model choice travels in the `x-goog-ext-525001261-jspb` header. The same number is mirrored into payload slot 79.
 
 When Gemini Web parks a request the stream carries `{"37":[n]}` queue heartbeats and no candidate text. Dragoman stops after three heartbeats and answers 503 with `model_not_available` instead of holding the connection open. Set `DRAGOMAN_PARKED_TICKS` to change the threshold.
+
+### Account tiers
+
+| Tier | Chat | Video analysis | Carbon |
+| :--- | :--- | :--- | :--- |
+| `pro` | yes | yes | no |
+| `ultra` | yes | yes | yes |
+| `free` | only with the free-chat switch | yes | no |
+
+Set the tier from the desktop app with **设为 Ultra**, or from the CLI.
+
+```bash
+dragoman desktop-accounts set-tier --id=named:shan --tier=ultra
+```
+
+The `类型` column shows the stored tier. The running proxy reloads the account files every 3 seconds, so a tier change applies without a restart.
 
 ### Example: Non-Streaming Request
 

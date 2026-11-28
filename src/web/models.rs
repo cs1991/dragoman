@@ -11,6 +11,10 @@ pub struct ModelSpec {
     pub model_id: &'static str,
     pub number: u32,
     pub available: bool,
+    /// Only an Ultra subscription can run this model. The proxy refuses the
+    /// request when no Ultra account is loaded instead of sending a Pro session
+    /// that would receive the Google AI Ultra upsell sheet.
+    pub requires_ultra: bool,
 }
 
 pub const AUTO: ModelSpec = ModelSpec {
@@ -19,6 +23,7 @@ pub const AUTO: ModelSpec = ModelSpec {
     model_id: "8c46e95b1a07cecc",
     number: 6,
     available: true,
+    requires_ultra: false,
 };
 
 pub const HYDROGEN: ModelSpec = ModelSpec {
@@ -27,6 +32,7 @@ pub const HYDROGEN: ModelSpec = ModelSpec {
     model_id: "56fdd199312815e2",
     number: 1,
     available: true,
+    requires_ultra: false,
 };
 
 pub const NEON: ModelSpec = ModelSpec {
@@ -35,6 +41,7 @@ pub const NEON: ModelSpec = ModelSpec {
     model_id: "e6fa609c3fa255c0",
     number: 3,
     available: true,
+    requires_ultra: false,
 };
 
 pub const CARBON: ModelSpec = ModelSpec {
@@ -42,11 +49,23 @@ pub const CARBON: ModelSpec = ModelSpec {
     label: "Carbon",
     model_id: "95a4c0abcba24364",
     number: 8,
-    available: false,
+    available: true,
+    requires_ultra: true,
 };
 
 /// Models advertised on `/v1/models` and accepted by `/v1/chat/completions`.
 pub const ADVERTISED: [ModelSpec; 3] = [AUTO, HYDROGEN, NEON];
+
+/// Models to advertise for the current account pool. Carbon only appears when
+/// an Ultra account is loaded, because every other pool answers it with an
+/// error.
+pub fn advertised_for_pool(has_ultra: bool) -> Vec<ModelSpec> {
+    let mut models = ADVERTISED.to_vec();
+    if has_ultra {
+        models.push(CARBON);
+    }
+    models
+}
 
 /// Context window advertised to OpenAI-compatible clients.
 ///
@@ -135,5 +154,27 @@ mod tests {
     #[test]
     fn carbon_is_not_advertised() {
         assert!(ADVERTISED.iter().all(|model| model.name != CARBON.name));
+        assert!(
+            advertised_for_pool(false)
+                .iter()
+                .all(|model| model.name != CARBON.name)
+        );
+        assert!(
+            advertised_for_pool(true)
+                .iter()
+                .any(|model| model.name == CARBON.name)
+        );
+    }
+
+    #[test]
+    fn carbon_requires_an_ultra_account() {
+        let carbon = resolve("gemini-4-carbon");
+        assert!(carbon.available);
+        assert!(carbon.requires_ultra);
+        let others: Vec<ModelSpec> = ["auto", "hydrogen", "neon"]
+            .iter()
+            .map(|name| resolve(name))
+            .collect();
+        assert!(others.iter().all(|model| !model.requires_ultra));
     }
 }
