@@ -237,7 +237,15 @@ Dragoman accepts requests with or without an `Authorization` header and does not
 | `gemini-4-neon` | `e6fa609c3fa255c0` | Deeper analysis. It reasons longer and runs code for arithmetic. |
 | `gemini-4-carbon` | `95a4c0abcba24364` | Frontier model for complex work. Routed only to Ultra accounts. |
 
-The legacy names `gemini-4-argon` and `gemini-4-argon-thinking` still resolve. They map to Hydrogen and Neon. An unknown name falls back to Hydrogen.
+The legacy names `gemini-4-argon` and `gemini-4-argon-thinking` still resolve. They map to Hydrogen and Neon.
+
+Foreign ids such as `gpt-4o` or `gpt-5-codex` fall back to Hydrogen, because OpenAI-compatible clients send their own names. A name one or two edits away from one of the four ids above is treated as a typo and rejected with HTTP 400 `model_not_found`.
+
+```
+{"error":{"message":"Unknown model gemini-4-carton. Did you mean gemini-4-carbon?","type":"model_not_found","code":400}}
+```
+
+Every successful response carries `x-dragoman-model` with the upstream id that answered, so a fallback is visible even when the JSON body echoes the requested name.
 
 `gemini-4-carbon` runs only on an account marked `ultra`. When at least one Ultra account is loaded, `/v1/models` includes Carbon and every Carbon request is leased from the Ultra subset. With no Ultra account loaded the request fails with HTTP 400 `model_not_available` and this message.
 

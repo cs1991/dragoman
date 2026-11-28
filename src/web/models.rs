@@ -97,6 +97,84 @@ pub fn resolve(requested: &str) -> ModelSpec {
     HYDROGEN
 }
 
+/// Return the canonical model a request most likely meant to name.
+///
+/// OpenAI-compatible clients send their own model ids (`gpt-4o`,
+/// `gpt-5-codex`) and those keep falling back to the default model. A name one
+/// or two edits away from one of our own ids is a different case: it is almost
+/// always a typo such as `gemini-4-carton`, and silently answering with
+/// Hydrogen would hide the mistake. Only those near misses are reported.
+///
+/// `resolve` stays unchanged, so request handling can still fall back for
+/// foreign names.
+pub fn typo_suggestion(requested: &str) -> Option<ModelSpec> {
+    let core = core_token(requested);
+    if core.is_empty() {
+        return None;
+    }
+    const CANONICAL: [(&str, ModelSpec); 4] = [
+        ("auto", AUTO),
+        ("hydrogen", HYDROGEN),
+        ("neon", NEON),
+        ("carbon", CARBON),
+    ];
+    if CANONICAL.iter().any(|(name, _)| *name == core) {
+        return None;
+    }
+    if matches!(core.as_str(), "argon" | "argon-thinking" | "thinking") {
+        return None;
+    }
+    let limit = if core.chars().count() >= 6 { 2 } else { 1 };
+    let mut best: Option<(usize, ModelSpec)> = None;
+    for (name, spec) in CANONICAL {
+        let distance = edit_distance(&core, name);
+        if distance <= limit && best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, spec));
+        }
+    }
+    best.map(|(_, spec)| spec)
+}
+
+/// Strip the prefixes clients add in front of the model id.
+fn core_token(requested: &str) -> String {
+    let mut name = requested.trim().to_ascii_lowercase();
+    loop {
+        let stripped = ["models/", "gemini-4-", "gemini-"]
+            .iter()
+            .find_map(|prefix| name.strip_prefix(prefix).map(str::to_string));
+        match stripped {
+            Some(rest) => name = rest,
+            None => break,
+        }
+    }
+    name
+}
+
+/// Levenshtein distance over characters, used only for typo detection.
+fn edit_distance(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    if left.is_empty() {
+        return right.len();
+    }
+    if right.is_empty() {
+        return left.len();
+    }
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0usize; right.len() + 1];
+    for (i, left_char) in left.iter().enumerate() {
+        current[0] = i + 1;
+        for (j, right_char) in right.iter().enumerate() {
+            let cost = usize::from(left_char != right_char);
+            current[j + 1] = (previous[j] + cost)
+                .min(previous[j + 1] + 1)
+                .min(current[j] + 1);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
 /// Tier capacity written into the model header.
 ///
 /// A Pro session reports tier flags `[8,0,38]`, which maps to capacity 2.
@@ -176,5 +254,28 @@ mod tests {
             .map(|name| resolve(name))
             .collect();
         assert!(others.iter().all(|model| !model.requires_ultra));
+    }
+
+    #[test]
+    fn typo_suggestion_flags_our_own_names_only() {
+        assert_eq!(
+            typo_suggestion("gemini-4-carton").map(|model| model.name),
+            Some("gemini-4-carbon")
+        );
+        assert_eq!(
+            typo_suggestion("carbonn").map(|model| model.name),
+            Some("gemini-4-carbon")
+        );
+        assert_eq!(
+            typo_suggestion("gemini-4-neonn").map(|model| model.name),
+            Some("gemini-4-neon")
+        );
+        assert!(typo_suggestion("gemini-4-carbon").is_none());
+        assert!(typo_suggestion("gemini-4-hydrogen").is_none());
+        assert!(typo_suggestion("gemini-4-argon").is_none());
+        assert!(typo_suggestion("gpt-4o").is_none());
+        assert!(typo_suggestion("gpt-5-codex").is_none());
+        assert!(typo_suggestion("gemini-1.5-pro").is_none());
+        assert!(typo_suggestion("claude-3-5-sonnet").is_none());
     }
 }

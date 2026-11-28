@@ -131,6 +131,17 @@ async fn chat_completions(
     info!("Received chat completion request for model: {}", req.model);
     info!("Request shape: {}", req.describe_shape());
 
+    if let Some(suggestion) = models::typo_suggestion(&req.model) {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "model_not_found",
+            format!(
+                "Unknown model {}. Did you mean {}?",
+                req.model, suggestion.name
+            ),
+        );
+    }
+
     let unsupported = req.unsupported_media_parts();
     if !unsupported.is_empty() {
         return openai_error(
@@ -341,9 +352,12 @@ async fn chat_completions(
             yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));
         };
 
-        Sse::new(sse_stream)
+        with_upstream_model(
+            Sse::new(sse_stream)
             .keep_alive(KeepAlive::default())
-            .into_response()
+            .into_response(),
+            model,
+        )
     } else {
         // The non-streaming response only needs the final text. Drain deltas so
         // a long answer cannot block the upstream reader on a full channel.
@@ -395,7 +409,7 @@ async fn chat_completions(
                     }),
                 };
 
-                Json(response).into_response()
+                with_upstream_model(Json(response).into_response(), model)
             }
             Err(e) => {
                 drain.abort();
@@ -440,4 +454,17 @@ pub(crate) fn openai_error(
         }
     });
     (status, Json(payload)).into_response()
+}
+
+/// Name the upstream model that actually answered.
+///
+/// Requests for a foreign id (`gpt-4o`, `gpt-5-codex`) are served by the
+/// default model, and the JSON body echoes whatever the client sent. The header
+/// removes that ambiguity for debugging.
+pub(crate) fn with_upstream_model(response: Response, model: models::ModelSpec) -> Response {
+    let mut response = response;
+    if let Ok(value) = axum::http::HeaderValue::from_str(model.name) {
+        response.headers_mut().insert("x-dragoman-model", value);
+    }
+    response
 }

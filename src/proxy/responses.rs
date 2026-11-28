@@ -39,7 +39,9 @@ use crate::openai::types::{
     ChatCompletionRequest, ChatMessage, FunctionCall, FunctionDefinition, MediaKind, ToolCall,
     ToolDefinition,
 };
-use crate::proxy::server::{AppState, classify_generation_error, openai_error};
+use crate::proxy::server::{
+    AppState, classify_generation_error, openai_error, with_upstream_model,
+};
 use crate::proxy::translator::PromptTranslator;
 use crate::web::models;
 
@@ -176,6 +178,17 @@ pub async fn responses(
         .clone()
         .unwrap_or_else(|| state.default_model.clone());
     info!("Received responses request for model: {}", requested_model);
+
+    if let Some(suggestion) = models::typo_suggestion(&requested_model) {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "model_not_found",
+            format!(
+                "Unknown model {}. Did you mean {}?",
+                requested_model, suggestion.name
+            ),
+        );
+    }
 
     let (mut chat, custom_tools) = match request.to_chat_request(&requested_model) {
         Ok(value) => value,
@@ -572,9 +585,12 @@ pub async fn responses(
             ));
         };
 
-        Sse::new(sse_stream)
+        with_upstream_model(
+            Sse::new(sse_stream)
             .keep_alive(KeepAlive::default())
-            .into_response()
+            .into_response(),
+            model_spec,
+        )
     } else {
         let drain = tokio::spawn(async move { while delta_rx.recv().await.is_some() {} });
         match state
@@ -619,7 +635,7 @@ pub async fn responses(
                     store_history(response_id, slim_messages(messages));
                 }
 
-                Json(body).into_response()
+                with_upstream_model(Json(body).into_response(), model_spec)
             }
             Err(e) => {
                 drain.abort();
